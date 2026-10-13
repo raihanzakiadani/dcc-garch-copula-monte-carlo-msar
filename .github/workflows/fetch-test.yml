@@ -1,0 +1,57 @@
+name: fetch-test
+# DATA-ONLY tests (no R, no model, nothing is published, production is never touched).
+#   check=probe   can each source be reached and parsed right now?                 (~2 min, writes nothing)
+#   check=ingest  run the real ingestion on a COPY of seed/raw_data.xlsx and show the new rows that would be appended;
+#                 the resulting file is attached to the run as artifact "ingest-test" (kept 3 days) for you to download and inspect
+on:
+  workflow_dispatch:
+    inputs:
+      check:
+        description: "Which data-only check"
+        type: choice
+        options: [probe, ingest]
+        default: probe
+permissions:
+  contents: read
+jobs:
+  data:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports: ["8191:8191"]
+    env:
+      FLARESOLVERR_URL: http://localhost:8191/v1
+      PROXY_URL: ${{ secrets.PROXY_URL }}
+      SRC_YAHOO_SHEET_CSV: ${{ secrets.SRC_YAHOO_SHEET_CSV }}
+      TZ: Asia/Jakarta
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: Probe every source
+        if: inputs.check == 'probe'
+        run: python -m ingest.probe --seed seed/raw_data.xlsx
+      - name: Ingest on a copy of the seed
+        if: inputs.check == 'ingest'
+        run: |
+          mkdir -p work audit
+          cp seed/raw_data.xlsx work/raw_data.xlsx
+          cp seed/phei_history.csv work/phei_history.csv
+          python -m ingest.capture_phei --store work/phei_history.csv --out work/phei_capture.json || echo "::warning::PHEI capture failed"
+          set +e
+          python -m ingest.run_ingest --xlsx work/raw_data.xlsx --out work/ingest_result.json --phei-store work/phei_history.csv
+          RC=$?
+          python scripts/ingest_summary.py work
+          exit $RC
+      - uses: actions/upload-artifact@v4
+        if: inputs.check == 'ingest' && always()
+        with:
+          name: ingest-test
+          path: |
+            work/raw_data.xlsx
+            work/ingest_result.json
+            work/phei_history.csv
+          retention-days: 3

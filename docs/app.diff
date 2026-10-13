@@ -1,0 +1,13 @@
+16a17,20
+> # [REFACTOR-DATA-RETRIEVAL] data now follows the latest published bundle (GitHub Releases) - see app_retrieval.R.
+> # Without DATA_REPO set the app behaves exactly as before (loads files from its own folder).
+> source(file.path(DEFAULT_ROOT_DIR, "app_retrieval.R"), local = FALSE)
+> 
+3849c3853
+<   attempt_load_root(DEFAULT_ROOT_DIR)
+---
+>   attempt_load_root(resolve_data_root(DEFAULT_ROOT_DIR))
+3852c3856
+<     attempt_load_root(DEFAULT_ROOT_DIR)
+---
+>     attempt_load_root(resolve_data_root(DEFAULT_ROOT_DIR))

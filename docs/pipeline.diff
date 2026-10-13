@@ -1,0 +1,349 @@
+34,38c34,39
+< for (pkg in required_packages) {
+<   if (!require(pkg, character.only = TRUE)) {
+<     install.packages(pkg, dependencies = TRUE)
+<     library(pkg, character.only = TRUE)
+<   }
+---
+> # [REFACTOR-NONINTERACTIVE] original: require() + install.packages() on every run.
+> # Now: packages must be pre-installed (scripts/install_deps.R, pinned snapshot) - fail fast if not.
+> .missing_pkgs <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
+> if (length(.missing_pkgs) > 0) {
+>   stop("Paket R belum terpasang: ", paste(.missing_pkgs, collapse = ", "),
+>        " - jalankan scripts/install_deps.R (tidak ada install.packages() otomatis pada pipeline).")
+39a41
+> for (pkg in required_packages) library(pkg, character.only = TRUE)
+42c44
+< cat(" SELURUH PACKAGE BERHASIL DIPERIKSA / DIINSTAL / DIMUAT   \n")
+---
+> cat(" SELURUH PACKAGE BERHASIL DIPERIKSA / DIMUAT              \n")
+45,56c47,139
+< cat("Silakan pilih file Excel dataset pada jendela yang muncul...\n")
+< 
+< if (.Platform$OS.type == "windows") {
+<   input_path <- choose.files(caption = "Pilih file dataset Excel (.xlsx)",
+<                              filters = matrix(c("Excel Files", "*.xlsx"), 1, 2),
+<                              multi = FALSE)
+< } else {
+<   input_path <- file.choose()
+< }
+< 
+< if (length(input_path) == 0 || input_path == "") {
+<   stop("Tidak ada file yang dipilih. Program dihentikan.")
+---
+> # [REFACTOR-NONINTERACTIVE] original: choose.files()/file.choose() + setwd(dirname(input)).
+> # Now: input/output come from environment variables set by the orchestrator (R/run_pipeline.R).
+> input_path <- Sys.getenv("PIPELINE_INPUT_XLSX", unset = "")
+> output_dir <- Sys.getenv("PIPELINE_OUTPUT_DIR", unset = "")
+> if (!nzchar(input_path) || !file.exists(input_path)) {
+>   stop("PIPELINE_INPUT_XLSX tidak di-set atau file tidak ada: '", input_path, "'. ",
+>        "Pipeline tidak lagi interaktif (tidak ada file.choose()).")
+> }
+> if (!nzchar(output_dir)) output_dir <- dirname(input_path)
+> dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+> input_path <- normalizePath(input_path, winslash = "/", mustWork = TRUE)
+> output_dir <- normalizePath(output_dir, winslash = "/", mustWork = TRUE)
+> setwd(output_dir)   # staging directory of THIS run (never a personal/laptop path)
+> 
+> # =============================================================================================
+> # [REFACTOR-SHARDING] Optional stage split so FULL can run as several short GitHub jobs
+> # (GitHub-hosted jobs are hard-limited to 6 h). Default PIPELINE_STAGE="all" = the original single run.
+> #   joint : data prep + macro ARMA-GARCH + DCC-GARCH/Copula; saves macro_stage.rds for the shard jobs; stops.
+> #   stocks: loads macro_stage.rds and estimates ONLY the stocks of shard PIPELINE_SHARD_INDEX (of PIPELINE_SHARD_COUNT); saves the shard; stops.
+> #   merge : loads macro_stage.rds + ALL shards (validated), then runs the original post-loop code unchanged.
+> # Statistics are unchanged: same functions, same arguments, and each stock keeps its ORIGINAL future.seed RNG stream
+> # (the full stock list is kept and non-shard stocks are skipped inside the worker function).
+> # =============================================================================================
+> PIPELINE_STAGE <- tolower(Sys.getenv("PIPELINE_STAGE", unset = "all"))
+> if (!PIPELINE_STAGE %in% c("all", "joint", "stocks", "merge")) {
+>   stop("PIPELINE_STAGE harus salah satu dari all, joint, stocks, merge (diterima: '", PIPELINE_STAGE, "')")
+> }
+> PIPELINE_SHARD_DIR   <- Sys.getenv("PIPELINE_SHARD_DIR", unset = file.path(output_dir, "_shards"))
+> PIPELINE_SHARD_INDEX <- suppressWarnings(as.integer(Sys.getenv("PIPELINE_SHARD_INDEX", unset = "1")))
+> PIPELINE_SHARD_COUNT <- suppressWarnings(as.integer(Sys.getenv("PIPELINE_SHARD_COUNT", unset = "1")))
+> if (PIPELINE_STAGE == "stocks" && (is.na(PIPELINE_SHARD_INDEX) || is.na(PIPELINE_SHARD_COUNT) ||
+>                                    PIPELINE_SHARD_COUNT < 1L || PIPELINE_SHARD_INDEX < 1L || PIPELINE_SHARD_INDEX > PIPELINE_SHARD_COUNT)) {
+>   stop("PIPELINE_SHARD_INDEX/PIPELINE_SHARD_COUNT tidak valid: ", PIPELINE_SHARD_INDEX, "/", PIPELINE_SHARD_COUNT)
+> }
+> RUN_MACRO_AND_JOINT <- PIPELINE_STAGE %in% c("all", "joint")
+> MACRO_STAGE_FILE    <- file.path(PIPELINE_SHARD_DIR, "macro_stage.rds")
+> PIPELINE_INPUT_MD5  <- unname(tools::md5sum(input_path))
+> .stage_t0           <- Sys.time()
+> 
+> pipeline_shard_stocks <- function(stock_targets, index, count) {
+>   stock_targets[((seq_along(stock_targets) - 1L) %% count) + 1L == index]     # deterministic round-robin
+> }
+> 
+> pipeline_save_rds_atomic <- function(obj, path) {
+>   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+>   tmp <- paste0(path, ".tmp_", Sys.getpid())
+>   saveRDS(obj, tmp)
+>   if (is.null(readRDS(tmp))) stop("verifikasi tulis gagal: ", path)
+>   if (!file.rename(tmp, path)) stop("gagal memindahkan ", tmp, " -> ", path)
+>   invisible(path)
+> }
+> 
+> pipeline_save_macro_stage <- function(file, macro_processed_df, macro_cols, stock_targets, input_md5) {
+>   pipeline_save_rds_atomic(list(macro_processed_df = macro_processed_df, macro_cols = macro_cols,
+>                                 stock_targets = stock_targets, input_md5 = input_md5), file)
+> }
+> 
+> pipeline_load_macro_stage <- function(file, macro_cols, stock_targets, input_md5) {
+>   if (!file.exists(file)) stop("macro_stage.rds tidak ditemukan (", file, "): jalankan tahap 'joint' lebih dulu.")
+>   ms <- readRDS(file)
+>   if (!identical(ms$input_md5, input_md5)) stop("macro_stage.rds berasal dari raw_data.xlsx yang BERBEDA dari input tahap ini.")
+>   if (!identical(ms$macro_cols, macro_cols)) stop("macro_cols pada macro_stage.rds tidak sama dengan dataset saat ini.")
+>   if (!identical(ms$stock_targets, stock_targets)) stop("stock_targets pada macro_stage.rds tidak sama dengan dataset saat ini.")
+>   if (!is.data.frame(ms$macro_processed_df) || !all(macro_cols %in% names(ms$macro_processed_df))) stop("macro_processed_df tidak valid.")
+>   ms$macro_processed_df
+> }
+> 
+> pipeline_save_shard <- function(shard_dir, index, count, stock_targets, all_results, input_md5, seconds) {
+>   mine <- pipeline_shard_stocks(stock_targets, index, count)
+>   res  <- all_results[mine]
+>   names(res) <- mine
+>   pipeline_save_rds_atomic(list(index = index, count = count, stocks = mine, results = res, input_md5 = input_md5,
+>                                 seconds = seconds, n_ok = sum(!vapply(res, is.null, logical(1)))),
+>                            file.path(shard_dir, sprintf("shard_%03d.rds", index)))
+>   invisible(mine)
+> }
+> 
+> pipeline_load_shards <- function(shard_dir, stock_targets, input_md5) {
+>   files <- list.files(shard_dir, pattern = "^shard_[0-9]+\\.rds$", full.names = TRUE)
+>   if (length(files) == 0) stop("tidak ada shard_*.rds pada ", shard_dir)
+>   shards <- lapply(files, readRDS)
+>   counts <- unique(vapply(shards, function(x) as.integer(x$count), integer(1)))
+>   if (length(counts) != 1L) stop("shard memiliki PIPELINE_SHARD_COUNT berbeda-beda: ", paste(counts, collapse = ","))
+>   idx <- sort(vapply(shards, function(x) as.integer(x$index), integer(1)))
+>   if (!identical(idx, seq_len(counts))) stop("shard tidak lengkap/ganda. Ada: ", paste(idx, collapse = ","), " | seharusnya 1..", counts)
+>   for (x in shards) {
+>     if (!identical(x$input_md5, input_md5)) stop("shard ", x$index, " dihitung dari raw_data.xlsx yang BERBEDA.")
+>     if (!identical(x$stocks, pipeline_shard_stocks(stock_targets, x$index, counts))) stop("daftar saham shard ", x$index, " tidak sesuai partisi.")
+>   }
+>   all_results <- setNames(vector("list", length(stock_targets)), stock_targets)
+>   for (x in shards) for (st in x$stocks) all_results[st] <- list(x$results[[st]])      # list(NULL) keeps failed stocks as NULL
+>   attr(all_results, "shard_seconds") <- vapply(shards[order(vapply(shards, function(x) x$index, numeric(1)))], function(x) as.numeric(x$seconds), numeric(1))
+>   all_results
+59,60d141
+< output_dir <- dirname(input_path)
+< setwd(output_dir)
+2421c2502
+< raw_data <- raw_data[order(raw_data[[date_col]]), ]
+---
+> raw_data <- raw_data[order(raw_data[[date_col]], seq_len(nrow(raw_data))), ]
+2422a2504,2506
+> # [REFACTOR-DEDUPE] original kept the FIRST row per date. Policy is now explicit via
+> # RAW_DEDUPE_POLICY ("last" default = the later-ingested row supersedes; "first" = legacy behaviour).
+> .dedupe_policy <- Sys.getenv("RAW_DEDUPE_POLICY", unset = "last")
+2425,2426c2509,2510
+<   cat(">> PERINGATAN: Ditemukan", n_dup, "tanggal duplikat. Baris duplikat dihapus.\n")
+<   raw_data <- raw_data[!duplicated(raw_data[[date_col]]), ]
+---
+>   cat(">> PERINGATAN: Ditemukan", n_dup, "tanggal duplikat. Baris duplikat dihapus (policy =", .dedupe_policy, ").\n")
+>   raw_data <- raw_data[!duplicated(raw_data[[date_col]], fromLast = identical(.dedupe_policy, "last")), ]
+2537a2622
+> if (RUN_MACRO_AND_JOINT) {
+2595a2681,2685
+> } else {
+>   # [REFACTOR-SHARDING] stages 'stocks'/'merge': macro results come from the 'joint' job (validated against this input).
+>   macro_processed_df <- pipeline_load_macro_stage(MACRO_STAGE_FILE, macro_cols, stock_targets, PIPELINE_INPUT_MD5)
+>   cat(">> [STAGE", PIPELINE_STAGE, "] macro_processed_df dimuat dari", MACRO_STAGE_FILE, "\n")
+> }
+2597a2688
+> if (RUN_MACRO_AND_JOINT) {
+3345a3437,3447
+> }
+> 
+> if (PIPELINE_STAGE == "joint") {
+>   if (!identical(bagian_4c_status, "SUKSES")) {
+>     cat(">> [STAGE joint] BAGIAN 4C GAGAL - menghentikan lebih awal agar jam komputasi tahap saham tidak terbuang.\n")
+>     quit(save = "no", status = 3)
+>   }
+>   pipeline_save_macro_stage(MACRO_STAGE_FILE, macro_processed_df, macro_cols, stock_targets, PIPELINE_INPUT_MD5)
+>   cat(">> [STAGE joint] selesai dalam", round(as.numeric(difftime(Sys.time(), .stage_t0, units = "mins")), 1), "menit. macro_stage.rds:", MACRO_STAGE_FILE, "\n")
+>   quit(save = "no", status = 0)
+> }
+5267c5369,5374
+< all_results <- list()
+---
+> shard_stocks <- if (PIPELINE_STAGE == "stocks") pipeline_shard_stocks(stock_targets, PIPELINE_SHARD_INDEX, PIPELINE_SHARD_COUNT) else stock_targets
+> if (PIPELINE_STAGE == "merge") {
+>   all_results <- pipeline_load_shards(PIPELINE_SHARD_DIR, stock_targets, PIPELINE_INPUT_MD5)
+>   cat(">> [STAGE merge]", length(stock_targets), "saham dirakit dari", length(attr(all_results, "shard_seconds")), "shard.\n")
+> } else {
+>   all_results <- list()
+5269,5316c5376,5425
+< N_CORES_STOCK_LOOP <- parallel::detectCores()
+< cat(">> [REFACTOR - PERFORMA] Memparalelkan loop", length(stock_targets), "saham pada",
+<     N_CORES_STOCK_LOOP, "core dengan DYNAMIC LOAD BALANCING (future.apply) - pekerja yang",
+<     "selesai duluan langsung mengambil saham berikutnya, tidak menunggu batch statis...\n")
+< 
+< # [OPTIMASI - LOAD BALANCING] future_lapply mendistribusikan tugas secara dinamis: setiap
+< # worker meminta saham berikutnya begitu selesai, bukan dibagi rata di awal (statis). Ini
+< # penting karena beban komputasi tiap saham berbeda-beda (tergantung jumlah variabel makro
+< # terpilih & orde AR), jadi core tidak menganggur menunggu satu saham "berat" yang kebagian
+< # ke satu worker saja. future.seed menjaga reproducibility RNG per-saham (setara doRNG).
+< plan_ok <- tryCatch({
+<   future::plan(future::multisession, workers = N_CORES_STOCK_LOOP)
+<   TRUE
+< }, error = function(e) { cat(">> future::plan() gagal:", conditionMessage(e), "\n"); FALSE })
+< 
+< if (isTRUE(plan_ok)) {
+<   all_results_list <- tryCatch(
+<     future.apply::future_lapply(
+<       stock_targets,
+<       function(stock) {
+<         tryCatch({
+<           run_pipeline(
+<             stock_name = stock,
+<             raw_data   = raw_data,
+<             macro_cols = macro_cols,
+<             date_col   = date_col,
+<             output_dir = output_dir,
+<             plots_root = plots_root,
+<             n_starts   = N_STARTS_MULTISTART,
+<             macro_processed_df = macro_processed_df,
+<             use_student_t_full_mle = USE_STUDENT_T_FULL_MLE,
+<             n_dup_global = n_dup, missing_summary_global = missing_summary
+<           )
+<         }, error = function(e) {
+<           cat("\n>> ERROR FATAL pada pipeline saham", stock, ":", conditionMessage(e), "\n")
+<           NULL
+<         })
+<       },
+<       future.seed = 123,
+<       future.globals = ls(envir = .GlobalEnv),
+<       future.packages = required_packages
+<     ),
+<     error = function(e) {
+<       cat(">> ERROR FATAL pada eksekusi paralel loop saham:", conditionMessage(e), "\n")
+<       NULL
+<     }
+<   )
+<   future::plan(future::sequential)
+---
+>   N_CORES_STOCK_LOOP <- parallel::detectCores()
+>   cat(">> [REFACTOR - PERFORMA] Memparalelkan loop", length(stock_targets), "saham pada",
+>       N_CORES_STOCK_LOOP, "core dengan DYNAMIC LOAD BALANCING (future.apply) - pekerja yang",
+>       "selesai duluan langsung mengambil saham berikutnya, tidak menunggu batch statis...\n")
+> 
+>   # [OPTIMASI - LOAD BALANCING] future_lapply mendistribusikan tugas secara dinamis: setiap
+>   # worker meminta saham berikutnya begitu selesai, bukan dibagi rata di awal (statis). Ini
+>   # penting karena beban komputasi tiap saham berbeda-beda (tergantung jumlah variabel makro
+>   # terpilih & orde AR), jadi core tidak menganggur menunggu satu saham "berat" yang kebagian
+>   # ke satu worker saja. future.seed menjaga reproducibility RNG per-saham (setara doRNG).
+>   plan_ok <- tryCatch({
+>     future::plan(future::multisession, workers = N_CORES_STOCK_LOOP)
+>     TRUE
+>   }, error = function(e) { cat(">> future::plan() gagal:", conditionMessage(e), "\n"); FALSE })
+> 
+>   if (isTRUE(plan_ok)) {
+>     all_results_list <- tryCatch(
+>       future.apply::future_lapply(
+>         stock_targets,
+>         function(stock) {
+>           # [REFACTOR-SHARDING] keep the FULL list (=> original per-stock RNG stream) but skip stocks of other shards
+>           if (PIPELINE_STAGE == "stocks" && !(stock %in% shard_stocks)) return(NULL)
+>           tryCatch({
+>             run_pipeline(
+>               stock_name = stock,
+>               raw_data   = raw_data,
+>               macro_cols = macro_cols,
+>               date_col   = date_col,
+>               output_dir = output_dir,
+>               plots_root = plots_root,
+>               n_starts   = N_STARTS_MULTISTART,
+>               macro_processed_df = macro_processed_df,
+>               use_student_t_full_mle = USE_STUDENT_T_FULL_MLE,
+>               n_dup_global = n_dup, missing_summary_global = missing_summary
+>             )
+>           }, error = function(e) {
+>             cat("\n>> ERROR FATAL pada pipeline saham", stock, ":", conditionMessage(e), "\n")
+>             NULL
+>           })
+>         },
+>         future.seed = 123,
+>         future.globals = ls(envir = .GlobalEnv),
+>         future.packages = required_packages
+>       ),
+>       error = function(e) {
+>         cat(">> ERROR FATAL pada eksekusi paralel loop saham:", conditionMessage(e), "\n")
+>         NULL
+>       }
+>     )
+>     future::plan(future::sequential)
+5318,5320c5427,5453
+<   if (!is.null(all_results_list)) {
+<     names(all_results_list) <- stock_targets
+<     all_results <- all_results_list
+---
+>     if (!is.null(all_results_list)) {
+>       names(all_results_list) <- stock_targets
+>       all_results <- all_results_list
+>     }
+>   } else {
+>     warning("[REFACTOR] future::plan() gagal - fallback ke eksekusi saham SEKUENSIAL.")
+>     for (stock in stock_targets) {
+>       if (PIPELINE_STAGE == "stocks" && !(stock %in% shard_stocks)) next
+>       all_results[[stock]] <- tryCatch({
+>         run_pipeline(
+>           stock_name = stock,
+>           raw_data   = raw_data,
+>           macro_cols = macro_cols,
+>           date_col   = date_col,
+>           output_dir = output_dir,
+>           plots_root = plots_root,
+>           n_starts   = N_STARTS_MULTISTART,
+>           macro_processed_df = macro_processed_df,
+>           use_student_t_full_mle = USE_STUDENT_T_FULL_MLE,
+>           n_dup_global = n_dup, missing_summary_global = missing_summary
+>         )
+>       }, error = function(e) {
+>         cat("\n>> ERROR FATAL pada pipeline saham", stock, ":", conditionMessage(e), "\n")
+>         cat(">> Pipeline untuk saham lain (jika ada) akan tetap dilanjutkan.\n\n")
+>         NULL
+>       })
+>     }
+5322,5342c5455,5463
+< } else {
+<   warning("[REFACTOR] future::plan() gagal - fallback ke eksekusi saham SEKUENSIAL.")
+<   for (stock in stock_targets) {
+<     all_results[[stock]] <- tryCatch({
+<       run_pipeline(
+<         stock_name = stock,
+<         raw_data   = raw_data,
+<         macro_cols = macro_cols,
+<         date_col   = date_col,
+<         output_dir = output_dir,
+<         plots_root = plots_root,
+<         n_starts   = N_STARTS_MULTISTART,
+<         macro_processed_df = macro_processed_df,
+<         use_student_t_full_mle = USE_STUDENT_T_FULL_MLE,
+<         n_dup_global = n_dup, missing_summary_global = missing_summary
+<       )
+<     }, error = function(e) {
+<       cat("\n>> ERROR FATAL pada pipeline saham", stock, ":", conditionMessage(e), "\n")
+<       cat(">> Pipeline untuk saham lain (jika ada) akan tetap dilanjutkan.\n\n")
+<       NULL
+<     })
+---
+> 
+>   if (PIPELINE_STAGE == "stocks") {
+>     if (is.null(names(all_results))) stop("[STAGE stocks] eksekusi paralel gagal total: tidak ada hasil.")
+>     pipeline_save_shard(PIPELINE_SHARD_DIR, PIPELINE_SHARD_INDEX, PIPELINE_SHARD_COUNT, stock_targets, all_results, PIPELINE_INPUT_MD5,
+>                         as.numeric(difftime(Sys.time(), .stage_t0, units = "secs")))
+>     n_ok <- sum(!vapply(all_results[shard_stocks], is.null, logical(1)))
+>     cat(">> [STAGE stocks] shard", PIPELINE_SHARD_INDEX, "/", PIPELINE_SHARD_COUNT, ":", n_ok, "dari", length(shard_stocks),
+>         "saham berhasil dalam", round(as.numeric(difftime(Sys.time(), .stage_t0, units = "mins")), 1), "menit.\n")
+>     quit(save = "no", status = if (n_ok == 0L) 2L else 0L)
+6116c6237,6240
+< if (length(all_markov_models) > 0) {
+---
+> # [REFACTOR-NONINTERACTIVE] original called mc_run_interactive() unconditionally. It is built on
+> # readline(); under Rscript readline() returns "" immediately and the repeat-loops can spin forever.
+> # The module itself is unchanged and still available interactively (RStudio) - only auto-start is gated.
+> if (length(all_markov_models) > 0 && interactive() && !identical(Sys.getenv("PIPELINE_SKIP_INTERACTIVE_MC"), "true")) {
+6117a6242,6244
+> } else if (length(all_markov_models) > 0) {
+>   cat(">> [NONINTERACTIVE] Modul Monte Carlo interaktif (Bagian 7) dilewati. Model & RDS sudah tersimpan;",
+>       "jalankan mc_run_interactive(output_dir) secara manual bila diperlukan.\n")

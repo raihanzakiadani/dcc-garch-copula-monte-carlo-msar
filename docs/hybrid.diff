@@ -1,0 +1,196 @@
+4,5c4,13
+< BASE_DIR <- "C:/GANTI_DENGAN_FOLDER_PROJECT_ANDA"
+< setwd(BASE_DIR)
+---
+> # ---------------------------------------------------------------------------------------------
+> # [REFACTOR-NONINTERACTIVE] All locations come from environment variables set by the orchestrator
+> # (R/run_pipeline.R). No setwd() to a personal folder, no placeholder paths.
+> #   HYBRID_WORK_DIR        directory holding raw_data.xlsx + models + Output_*.xlsx for THIS run
+> #   PIPELINE_SCRIPT        path to pipeline/15092026.R (methodology source of truth)
+> #   PIPELINE_RUN_DIR       non-published scratch (backups, audit log, status json)
+> #   PIPELINE_MODE          DAILY | FULL | AUTO | RECALIBRATE   (default DAILY - never silently AUTO)
+> # ---------------------------------------------------------------------------------------------
+> .env_or <- function(name, default) { v <- Sys.getenv(name, unset = ""); if (nzchar(v)) v else default }
+> BASE_DIR <- normalizePath(.env_or("HYBRID_WORK_DIR", getwd()), winslash = "/", mustWork = TRUE)
+7c15
+< PATH_PIPELINE_SCRIPT   <- file.path(BASE_DIR, "01092026.R")
+---
+> PATH_PIPELINE_SCRIPT   <- .env_or("PIPELINE_SCRIPT", file.path(getwd(), "pipeline", "15092026.R"))
+10c18
+< PATH_NEW_DATA          <- file.path(BASE_DIR, "GANTI_DENGAN_NAMA_DATASET_TERBARU.xlsx")
+---
+> PATH_NEW_DATA          <- file.path(BASE_DIR, "raw_data.xlsx")
+12,13c20,23
+< PATH_BACKUP_DIR        <- file.path(BASE_DIR, "Backup_Models")
+< PATH_AUDIT_LOG_DIR     <- file.path(BASE_DIR, "Audit_Log")
+---
+> RUN_DIR                <- .env_or("PIPELINE_RUN_DIR", file.path(BASE_DIR, "_run"))
+> PATH_BACKUP_DIR        <- file.path(RUN_DIR, "Backup_Models")
+> PATH_AUDIT_LOG_DIR     <- file.path(RUN_DIR, "Audit_Log")
+> PATH_STATUS_JSON       <- file.path(RUN_DIR, "hybrid_status.json")
+18c28
+< MODE                        <- "AUTO"
+---
+> MODE                        <- .env_or("PIPELINE_MODE", "DAILY")
+26a37,40
+> # [ADDED] DAILY must never publish a half-updated model set (some stocks at t, others at t-1).
+> # STRICT_ATOMIC=true: if ANY stock needs FULL, nothing is saved and the status file says why.
+> STRICT_ATOMIC <- !identical(tolower(.env_or("HYBRID_STRICT_ATOMIC", "true")), "false")
+> 
+28c42
+< N_CORES_HYBRID        <- max(1, parallel::detectCores() - 1)
+---
+> N_CORES_HYBRID        <- max(1, as.integer(.env_or("HYBRID_N_CORES", as.character(parallel::detectCores() - 1))))
+30a45,46
+> # Only packages this script itself calls. (The original list also named foreach/doParallel/doRNG but this
+> # file never uses them; FULL mode runs pipeline/15092026.R which performs its own, complete package check.)
+32,37c48,57
+<                               "parallel", "foreach", "doParallel", "doRNG")
+< for (pkg in REQUIRED_PACKAGES_HYBRID) {
+<   if (!requireNamespace(pkg, quietly = TRUE)) {
+<     install.packages(pkg, dependencies = TRUE)
+<   }
+< }
+---
+>                               "parallel", "jsonlite")
+> .missing_h <- REQUIRED_PACKAGES_HYBRID[!vapply(REQUIRED_PACKAGES_HYBRID, requireNamespace, logical(1), quietly = TRUE)]
+> if (length(.missing_h) > 0) {
+>   stop("Paket R belum terpasang: ", paste(.missing_h, collapse = ", "), " - jalankan scripts/install_deps.R.")
+> }
+> HYBRID_STATUS <- list(mode_requested = MODE, mode_executed = NA_character_, ok = FALSE, n_stocks = 0L,
+>                       n_updated = 0L, n_up_to_date = 0L, needs_full = character(0), needs_full_reasons = list(),
+>                       excel_failed = character(0), new_stock_columns_without_model = character(0),
+>                       fallback_full = FALSE, fallback_reason = NA_character_, last_data_date = NA_character_,
+>                       saved = FALSE, note = "")
+175c195,197
+<   raw_data <- raw_data[order(raw_data[[date_col]]), ]
+---
+>   raw_data <- raw_data[order(raw_data[[date_col]], seq_len(nrow(raw_data))), ]
+>   # [REFACTOR-DEDUPE] same policy as pipeline/15092026.R (RAW_DEDUPE_POLICY, default "last")
+>   .dedupe_policy <- Sys.getenv("RAW_DEDUPE_POLICY", unset = "last")
+178,179c200,201
+<     cat(">> [DATA QUALITY] PERINGATAN:", n_dup, "tanggal duplikat ditemukan pada dataset baru. Baris duplikat dihapus.\n")
+<     raw_data <- raw_data[!duplicated(raw_data[[date_col]]), ]
+---
+>     cat(">> [DATA QUALITY] PERINGATAN:", n_dup, "tanggal duplikat ditemukan pada dataset baru. Baris duplikat dihapus (policy =", .dedupe_policy, ").\n")
+>     raw_data <- raw_data[!duplicated(raw_data[[date_col]], fromLast = identical(.dedupe_policy, "last")), ]
+516c538
+<   backup_xlsx <- file.path(dirname(excel_path),
+---
+>   backup_xlsx <- file.path(PATH_BACKUP_DIR,
+546c568
+<       "run interaktif penuh 01092026.R, jalankan mode FULL."
+---
+>       "run interaktif penuh 15092026.R, jalankan mode FULL."
+567c589
+<   cat("#  MODE FULL - MENJALANKAN ULANG 01092026.R SECARA VERBATIM\n")
+---
+>   cat("#  MODE FULL - MENJALANKAN ULANG 15092026.R SECARA VERBATIM\n")
+571,591c593,598
+<   original_lines <- readLines(PATH_PIPELINE_SCRIPT, warn = FALSE, encoding = "UTF-8")
+<   
+<   block_start <- grep("^if \\(\\.Platform\\$OS\\.type == \"windows\"\\) \\{", original_lines)
+<   block_end <- grep("^setwd\\(output_dir\\)", original_lines)
+<   if (length(block_start) == 0 || length(block_end) == 0) {
+<     stop("run_full_mode(): tidak dapat menemukan blok input interaktif (file.choose()) pada 01092026.R untuk digantikan secara otomatis - jalankan 01092026.R secara manual/interaktif sebagai gantinya.")
+<   }
+<   block_start <- block_start[1]
+<   block_end <- block_end[1]
+<   
+<   replacement <- c(
+<     paste0("input_path <- \"", gsub("\\\\", "/", PATH_NEW_DATA), "\""),
+<     paste0("output_dir <- \"", gsub("\\\\", "/", PATH_OUTPUT_DIR), "\""),
+<     "setwd(output_dir)"
+<   )
+<   
+<   adapted_lines <- c(original_lines[1:(block_start - 1)], replacement,
+<                      original_lines[(block_end + 1):length(original_lines)])
+<   
+<   tmp_script <- tempfile(fileext = ".R")
+<   writeLines(adapted_lines, tmp_script)
+---
+>   # [REFACTOR-NONINTERACTIVE] original patched the source text of the pipeline in memory to swap the
+>   # file.choose() block. The pipeline now reads these variables itself, so it runs VERBATIM.
+>   Sys.setenv(PIPELINE_INPUT_XLSX = PATH_NEW_DATA, PIPELINE_OUTPUT_DIR = PATH_OUTPUT_DIR,
+>              PIPELINE_SKIP_INTERACTIVE_MC = "true")
+>   tmp_script <- PATH_PIPELINE_SCRIPT
+>   HYBRID_STATUS$mode_executed <<- "FULL"
+603d609
+<   unlink(tmp_script)
+608a615
+>     HYBRID_STATUS$ok <<- FALSE; HYBRID_STATUS$note <<- "FULL pipeline raised an error (see console log)."
+616a624
+>     HYBRID_STATUS$ok <<- FALSE; HYBRID_STATUS$note <<- "all_markov_models empty after FULL."
+636a645,647
+>   HYBRID_STATUS$ok <<- TRUE; HYBRID_STATUS$saved <<- TRUE
+>   HYBRID_STATUS$n_stocks <<- length(all_markov_models_new); HYBRID_STATUS$n_updated <<- length(all_markov_models_new)
+>   HYBRID_STATUS$last_data_date <<- as.character(max(vapply(all_markov_models_new, function(m) as.character(max(m$final_fit$last_actual_date)), character(1))))
+692a704,706
+>     if (!isTRUE(HYBRID_STATUS$fallback_full)) {   # keep the more specific reason if corruption was already detected
+>       HYBRID_STATUS$fallback_full <<- TRUE; HYBRID_STATUS$fallback_reason <<- "All_Markov_Models.rds not found (first run)"
+>     }
+705a720,721
+>   needs_full_reasons <- list()
+>   n_updated <- 0L
+706a723,726
+>   HYBRID_STATUS$mode_executed <<- if (identical(MODE, "AUTO")) "AUTO" else MODE
+>   HYBRID_STATUS$n_stocks <<- length(all_markov_models)
+>   HYBRID_STATUS$last_data_date <<- as.character(new_data_max_date)
+>   HYBRID_STATUS$new_stock_columns_without_model <<- setdiff(cols_detected$stock_targets, names(all_markov_models))
+790a811
+>         needs_full_reasons[[stock_name]] <- res$reason
+806c827,828
+<         update_stock_excel(stock_name, res, PATH_OUTPUT_DIR, "DAILY")
+---
+>         if (!isTRUE(update_stock_excel(stock_name, res, PATH_OUTPUT_DIR, "DAILY"))) HYBRID_STATUS$excel_failed <<- c(HYBRID_STATUS$excel_failed, stock_name)
+>         n_updated <- n_updated + 1L
+819c841,842
+<         update_stock_excel(stock_name, res, PATH_OUTPUT_DIR, "RECALIBRATE_WARMSTART")
+---
+>         if (!isTRUE(update_stock_excel(stock_name, res, PATH_OUTPUT_DIR, "RECALIBRATE_WARMSTART"))) HYBRID_STATUS$excel_failed <<- c(HYBRID_STATUS$excel_failed, stock_name)
+>         n_updated <- n_updated + 1L
+826a850,866
+>   HYBRID_STATUS$n_updated <<- n_updated
+>   HYBRID_STATUS$needs_full <<- stocks_needing_full
+>   HYBRID_STATUS$needs_full_reasons <<- needs_full_reasons
+>   HYBRID_STATUS$n_up_to_date <<- length(all_markov_models) - n_updated - length(stocks_needing_full)
+>   
+>   if (length(stocks_needing_full) > 0 && isTRUE(STRICT_ATOMIC)) {
+>     cat("\n>> [STRICT_ATOMIC] ", length(stocks_needing_full), " saham memerlukan FULL (", paste(utils::head(stocks_needing_full, 10), collapse = ", "),
+>         "...). TIDAK ADA artefak yang disimpan agar tidak terbentuk model set campuran (sebagian t, sebagian t-1).\n", sep = "")
+>     HYBRID_STATUS$ok <<- FALSE; HYBRID_STATUS$saved <<- FALSE
+>     HYBRID_STATUS$note <<- "DAILY validation failed for >=1 stock; nothing saved (strict atomic)."
+>     return(invisible(NULL))
+>   }
+>   if (n_updated == 0L && length(stocks_needing_full) == 0L) {
+>     cat("\n>> [UP_TO_DATE] Tidak ada observasi baru untuk model manapun - RDS TIDAK ditulis ulang.\n")
+>     HYBRID_STATUS$ok <<- TRUE; HYBRID_STATUS$saved <<- FALSE; HYBRID_STATUS$note <<- "UP_TO_DATE"
+>     return(invisible(all_markov_models))
+>   }
+827a868
+>   HYBRID_STATUS$ok <<- (length(stocks_needing_full) == 0L); HYBRID_STATUS$saved <<- TRUE
+900,901c941,952
+<   stop("Dataset terbaru tidak ditemukan pada PATH_NEW_DATA: ", PATH_NEW_DATA,
+<        " - set variabel PATH_NEW_DATA di bagian CONFIG sebelum menjalankan skrip ini.")
+---
+>   stop("Dataset tidak ditemukan pada ", PATH_NEW_DATA, " (HYBRID_WORK_DIR=", BASE_DIR, ").")
+> }
+> 
+> # A model RDS that exists but cannot be read is a corrupted state: do not crash silently, route to FULL.
+> if (file.exists(PATH_MARKOV_MODELS) && MODE %in% c("DAILY", "RECALIBRATE", "AUTO")) {
+>   .probe <- tryCatch(readRDS(PATH_MARKOV_MODELS), error = function(e) NULL)
+>   if (is.null(.probe) || !is.list(.probe) || length(.probe) == 0) {
+>     cat(">> [STATE] All_Markov_Models.rds tidak dapat dibaca / kosong -> dianggap rusak, dialihkan ke FULL.\n")
+>     HYBRID_STATUS$fallback_full <- TRUE; HYBRID_STATUS$fallback_reason <- "All_Markov_Models.rds unreadable/empty"
+>     unlink(PATH_MARKOV_MODELS)
+>   }
+>   rm(.probe)
+915c966,970
+< cat(">> SELESAI.\n")
+\ No newline at end of file
+---
+> 
+> HYBRID_STATUS$audit_log <- basename(audit_log_path)
+> jsonlite::write_json(HYBRID_STATUS, PATH_STATUS_JSON, auto_unbox = TRUE, pretty = TRUE, null = "null", na = "null")
+> cat(">> Status hybrid tersimpan pada:", PATH_STATUS_JSON, " | ok =", HYBRID_STATUS$ok, "| saved =", HYBRID_STATUS$saved, "\n")
+> if (!isTRUE(HYBRID_STATUS$ok)) quit(save = "no", status = 2)

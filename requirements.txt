@@ -1,0 +1,9 @@
+# Versions below are the ones the test-suite was actually run with (2026-10-09 sandbox). curl_cffi could not be
+# installed/tested in that sandbox (same constraint as the old idx-to-sheets project: >=0.7).
+pandas==3.0.2
+numpy==2.4.4
+openpyxl==3.1.5
+beautifulsoup4==4.14.3
+lxml==6.0.2
+curl_cffi>=0.7.4
+pytest==9.1.1

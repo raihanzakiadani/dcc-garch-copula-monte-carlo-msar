@@ -1,0 +1,31 @@
+name: setup-env
+description: Python deps + system libs + pinned R + R packages (cached)
+inputs:
+  python:
+    description: install python requirements
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      if: inputs.python == 'true'
+      with: { python-version: "3.12", cache: pip }
+    - if: inputs.python == 'true'
+      shell: bash
+      run: pip install -r requirements.txt
+    - name: System libraries for R packages (rugarch/rmgarch/copula toolchain)
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev \
+          libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev libgmp-dev libmpfr-dev \
+          libudunits2-dev cmake gfortran
+    - uses: r-lib/actions/setup-r@v2
+      with: { r-version: "4.4.2", use-public-rspm: true }
+    - uses: actions/cache@v4
+      with:
+        path: ${{ env.R_LIBS_USER }}
+        key: rlib-${{ runner.os }}-4.4.2-${{ hashFiles('config/r_packages.txt', 'config/r_snapshot.txt', 'renv.lock') }}
+    - name: Install R packages (date-pinned snapshot)
+      shell: bash
+      run: Rscript scripts/install_deps.R

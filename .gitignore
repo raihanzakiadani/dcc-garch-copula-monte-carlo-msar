@@ -1,0 +1,10 @@
+work/
+dist/
+audit/
+sessionInfo.txt
+.env
+*.Renviron
+.Renviron
+__pycache__/
+.pytest_cache/
+*.tmp

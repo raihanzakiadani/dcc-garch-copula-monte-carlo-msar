@@ -1,0 +1,21 @@
+name: rollback
+# Re-point the dashboard to an earlier VERIFIED version (hash-checked before it becomes "latest").
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to restore, e.g. data-20261009T110512Z-123456789 (see Releases)"
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: pipeline-prod
+  cancel-in-progress: false
+jobs:
+  rollback:
+    if: vars.EXPECTED_REPOSITORY == github.repository
+    runs-on: ubuntu-24.04
+    env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/release.py promote --tag "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY"

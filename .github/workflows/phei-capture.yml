@@ -1,0 +1,33 @@
+name: phei-capture
+# PHEI shows ONE day only. This extra retry (19:30 WIB) makes sure a day is never lost if the main run captured too early.
+on:
+  schedule:
+    - cron: "30 12 * * 1-5"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: pipeline-prod
+  cancel-in-progress: false
+jobs:
+  capture:
+    if: vars.EXPECTED_REPOSITORY == github.repository
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    timeout-minutes: 15
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports: ["8191:8191"]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FLARESOLVERR_URL: http://localhost:8191/v1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - run: |
+          mkdir -p work
+          gh release download phei-history --repo "$GITHUB_REPOSITORY" --pattern phei_history.csv --dir work --clobber || echo "no history yet"
+          python -m ingest.capture_phei --store work/phei_history.csv
+          python scripts/release.py phei-push --store work/phei_history.csv --repo "$GITHUB_REPOSITORY"

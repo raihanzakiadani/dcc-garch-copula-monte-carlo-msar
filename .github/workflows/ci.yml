@@ -1,0 +1,21 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends r-base-core r-cran-readxl r-cran-openxlsx r-cran-jsonlite r-cran-digest r-cran-numderiv r-cran-matrix r-cran-zoo r-cran-tseries r-cran-car r-cran-future r-cran-future.apply r-cran-codetools
+      - name: Parse all R scripts
+        run: for f in pipeline/*.R app/*.R R/*.R; do Rscript -e "invisible(parse('$f'))" && echo "ok $f"; done
+      - run: python -m pytest -q tests
+      - name: R integration tests (hybrid DAILY on synthetic fixed-parameter models; shard helpers + RNG equivalence)
+        run: |
+          REPO_ROOT=$PWD Rscript tests/R/test_hybrid.R
+          REPO_ROOT=$PWD Rscript tests/R/test_shards.R

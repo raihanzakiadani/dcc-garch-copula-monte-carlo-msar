@@ -1,0 +1,254 @@
+name: pipeline
+
+# 18:00 WIB (UTC+7) == 11:00 UTC on the SAME calendar date, so no day shift. Mon-Fri only (IDX weekdays).
+# GitHub cron is best-effort: runs are often delayed minutes to an hour+, so 18:00 is a TARGET, not a guarantee.
+# DAILY vs FULL is decided at runtime from the WIB weekday (Friday = FULL) - see scripts/plan_mode.py.
+#
+# FULL strategies (repository variables):
+#   FULL_SHARDS=N (2..100)  FULL is split per stock into N short jobs on GitHub-hosted runners (each job < 6 h)   -> jobs prepare/joint/shards/merge
+#   FULL_RUNNER_LABEL=...   FULL runs as ONE job on your self-hosted runner (no 6 h limit; 5 days)               -> job run
+#   neither                 Friday runs DAILY and the Summary says "FULL SKIPPED"
+on:
+  schedule:
+    - cron: "0 11 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Pipeline mode"
+        type: choice
+        options: [DAILY, FULL]
+        default: DAILY
+      dry_run:
+        description: "Dry run (do everything except publish). Default true for manual runs."
+        type: boolean
+        default: true
+
+permissions:
+  contents: write        # create releases (the only write we need). No commits are made by this workflow.
+  issues: write          # open an issue on failure
+
+concurrency:
+  group: pipeline-prod   # one writer at a time; shared with phei-capture and rollback
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      ok: ${{ steps.p.outputs.ok }}
+      mode: ${{ steps.p.outputs.mode }}
+      strategy: ${{ steps.p.outputs.strategy }}
+      dry_run: ${{ steps.p.outputs.dry_run }}
+      full_skipped: ${{ steps.p.outputs.full_skipped }}
+      runner: ${{ steps.p.outputs.runner }}
+      timeout: ${{ steps.p.outputs.timeout }}
+      shards: ${{ steps.p.outputs.shards }}
+      matrix: ${{ steps.p.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        env:
+          EXPECTED_REPOSITORY: ${{ vars.EXPECTED_REPOSITORY }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          INPUTS_JSON: ${{ toJSON(github.event.inputs) }}
+          RUNNER_LABEL: ${{ vars.RUNNER_LABEL }}
+          FULL_RUNNER_LABEL: ${{ vars.FULL_RUNNER_LABEL }}
+          FULL_SHARDS: ${{ vars.FULL_SHARDS }}
+          ALLOW_FULL_ON_HOSTED: ${{ vars.ALLOW_FULL_ON_HOSTED }}
+        run: python3 scripts/plan_mode.py
+
+  # ------------------------------------------------------------------------------------------------
+  # Single-job path: DAILY, or FULL on a self-hosted runner (or hosted if ALLOW_FULL_ON_HOSTED=true)
+  # ------------------------------------------------------------------------------------------------
+  run:
+    needs: plan
+    if: needs.plan.outputs.ok == 'true' && needs.plan.outputs.strategy != 'sharded'
+    runs-on: ${{ needs.plan.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout) }}
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports: ["8191:8191"]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FLARESOLVERR_URL: http://localhost:8191/v1
+      PROXY_URL: ${{ secrets.PROXY_URL }}                     # optional
+      SRC_YAHOO_SHEET_CSV: ${{ secrets.SRC_YAHOO_SHEET_CSV }}  # published-CSV URL of the Yahoo feed sheet (USDIDR, Brent)
+      TZ: Asia/Jakarta
+      FULL_SKIPPED: ${{ needs.plan.outputs.full_skipped }}
+      # a DAILY job must never silently start a multi-hour FULL (hosted jobs are cut at 6 h): it reports FULL REQUIRED instead
+      ALLOW_DAILY_FALLBACK_FULL: ${{ needs.plan.outputs.strategy == 'monolith' && 'true' || 'false' }}
+      HYBRID_ALLOW_FULL_FALLBACK: ${{ needs.plan.outputs.strategy == 'monolith' && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-env
+      - name: Fast tests (abort before touching anything)
+        run: python -m pytest -q tests/test_plan_mode.py tests/test_ingest.py
+      - name: Run pipeline
+        run: scripts/ci_run.sh "${{ needs.plan.outputs.mode }}" "${{ needs.plan.outputs.dry_run }}"
+      - name: Upload audit + logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-${{ github.run_id }}
+          path: |
+            audit/
+            work/ingest_result.json
+            work/run_result.json
+            work/_run/*.log
+            work/_run/hybrid_status.json
+            work/_run/Audit_Log/
+          retention-days: 90
+
+  # ------------------------------------------------------------------------------------------------
+  # Sharded FULL: prepare -> joint -> N x shard -> merge   (every job on a hosted runner, each < 6 h)
+  # ------------------------------------------------------------------------------------------------
+  prepare:
+    needs: plan
+    if: needs.plan.outputs.ok == 'true' && needs.plan.outputs.strategy == 'sharded'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports: ["8191:8191"]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FLARESOLVERR_URL: http://localhost:8191/v1
+      PROXY_URL: ${{ secrets.PROXY_URL }}
+      SRC_YAHOO_SHEET_CSV: ${{ secrets.SRC_YAHOO_SHEET_CSV }}
+      STOP_ON_INGEST_FAILED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q tests/test_plan_mode.py tests/test_ingest.py
+      - name: Fetch state, capture PHEI, ingest
+        run: scripts/ci_steps.sh prepare FULL "${{ needs.plan.outputs.dry_run }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: work-in
+          path: work/
+          retention-days: 2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: audit-prepare-${{ github.run_id }}
+          path: |
+            audit/
+            work/ingest_result.json
+          retention-days: 90
+
+  joint:
+    needs: [plan, prepare]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-env
+        with: { python: "true" }
+      - uses: actions/download-artifact@v4
+        with: { name: work-in, path: work }
+      - name: Stage joint (data prep + macro ARMA-GARCH + DCC/Copula)
+        env:
+          TZ: Asia/Jakarta
+          PIPELINE_STAGE: joint
+        run: |
+          export RAW_DEDUPE_POLICY="$(python3 -c "import json;print(json.load(open('config/pipeline.json'))['dataset']['dedupe_policy'])")"
+          mkdir -p stage/joint
+          PIPELINE_INPUT_XLSX="$PWD/work/raw_data.xlsx" PIPELINE_OUTPUT_DIR="$PWD/stage/joint" PIPELINE_SHARD_DIR="$PWD/stage/joint/_shards" \
+            Rscript pipeline/15092026.R
+      - uses: actions/upload-artifact@v4
+        with:
+          name: joint-out
+          path: stage/joint
+          retention-days: 2
+
+  shards:
+    needs: [plan, joint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350                                   # hosted limit is 360; a shard that needs more => raise FULL_SHARDS
+    strategy:
+      fail-fast: false                                     # finished shards survive; use "Re-run failed jobs" for the rest
+      max-parallel: ${{ fromJSON(vars.FULL_MAX_PARALLEL || '20') }}
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-env
+      - uses: actions/download-artifact@v4
+        with: { name: work-in, path: work }
+      - uses: actions/download-artifact@v4
+        with: { name: joint-out, path: stage/joint }
+      - name: Stage stocks (shard ${{ matrix.shard }} / ${{ needs.plan.outputs.shards }})
+        env:
+          TZ: Asia/Jakarta
+          PIPELINE_STAGE: stocks
+          PIPELINE_SHARD_INDEX: ${{ matrix.shard }}
+          PIPELINE_SHARD_COUNT: ${{ needs.plan.outputs.shards }}
+        run: |
+          export RAW_DEDUPE_POLICY="$(python3 -c "import json;print(json.load(open('config/pipeline.json'))['dataset']['dedupe_policy'])")"
+          mkdir -p stage/shard/_shards
+          cp stage/joint/_shards/macro_stage.rds stage/shard/_shards/
+          PIPELINE_INPUT_XLSX="$PWD/work/raw_data.xlsx" PIPELINE_OUTPUT_DIR="$PWD/stage/shard" PIPELINE_SHARD_DIR="$PWD/stage/shard/_shards" \
+            Rscript pipeline/15092026.R
+          Rscript scripts/shard_meta.R stage/shard/_shards
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: stage/shard
+          retention-days: 2
+
+  merge:
+    needs: [plan, prepare, joint, shards]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TZ: Asia/Jakarta
+      ALLOW_DAILY_FALLBACK_FULL: "false"
+      HYBRID_ALLOW_FULL_FALLBACK: "false"
+      PIPELINE_MODE: FULL
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-env
+      - uses: actions/download-artifact@v4
+        with: { name: work-in, path: work }
+      - uses: actions/download-artifact@v4
+        with: { name: joint-out, path: work }
+      - uses: actions/download-artifact@v4
+        with: { pattern: "shard-*", path: work, merge-multiple: true }
+      - name: Shard timing report
+        run: python3 scripts/shard_report.py work/_shards
+      - name: Merge + validate (hybrid FULL, stage=merge)
+        env:
+          PIPELINE_STAGE: merge
+        run: |
+          echo "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          scripts/ci_steps.sh model FULL
+      - name: Bundle + publish
+        run: scripts/ci_steps.sh publish "${{ needs.plan.outputs.dry_run }}"
+      - name: Upload audit + logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-merge-${{ github.run_id }}
+          path: |
+            audit/
+            work/ingest_result.json
+            work/run_result.json
+            work/_run/*.log
+            work/_run/hybrid_status.json
+            work/_run/Audit_Log/
+          retention-days: 90
+
+  notify:
+    needs: [plan, run, prepare, joint, shards, merge]
+    if: always() && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-24.04
+    env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+    steps:
+      - run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "Pipeline FAILED $(date -u +%F) run ${{ github.run_id }}" \
+            --body "Mode: ${{ needs.plan.outputs.mode }} (${{ needs.plan.outputs.strategy }}). Production data was left unchanged. If the log says FULL REQUIRED, run the workflow manually with mode FULL. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true

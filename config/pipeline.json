@@ -1,0 +1,177 @@
+{
+  "timezone_local": "Asia/Jakarta",
+  "schedule_note": "Cron '0 11 * * 1-5' UTC == 18:00 WIB (UTC+7), Mon-Fri, same calendar date in UTC and WIB. Mode is decided from the WIB weekday at runtime: Friday -> FULL, otherwise DAILY.",
+  "full_pipeline_weekday_wib": 5,
+  "dataset": {
+    "date_column": "Dates",
+    "stock_pattern": "\\bIJ\\s*EQUITY\\b",
+    "dedupe_policy": "last",
+    "max_abs_daily_logret": 0.5,
+    "revision_rel_tolerance": 1e-09,
+    "revision_lookback_days": 10,
+    "anchor_rel_tolerance": 1e-06,
+    "max_catchup_days": 14,
+    "overlap_window_weekdays": 40,
+    "overlap_min_n": 15,
+    "max_abs_diff_yield_pp": 2.0,
+    "tail_carry_days": 2
+  },
+  "artifacts": {
+    "required_core_files": [
+      "All_Markov_Models.rds",
+      "JointDistribution_Model.rds",
+      "raw_data.xlsx"
+    ],
+    "publish_globs": [
+      "All_Markov_Models.rds",
+      "JointDistribution_Model.rds",
+      "raw_data.xlsx",
+      "Output_*.xlsx",
+      "Plots",
+      "MonteCarlo"
+    ],
+    "never_publish": [
+      "Backup_Models",
+      "Audit_Log",
+      "_run",
+      "*_backup_*",
+      "*.log",
+      "*.tmp",
+      "*.tmp_*",
+      ".env",
+      "*.Renviron",
+      "_shards"
+    ]
+  },
+  "publish": {
+    "release_tag_latest": "data-latest",
+    "release_tag_prefix": "data-",
+    "keep_versions": 14
+  },
+  "ingest": {
+    "required_failure_policy": "FAILED",
+    "optional_failure_policy": "PARTIAL_SUCCESS",
+    "note": "Row calendar = every weekday (matches history: 0 missing weekdays since 2023). Closed-market days carry the last level forward (history convention), bounded by max_carry_days."
+  },
+  "instruments": {
+    "JCI Index": {
+      "required": true,
+      "provider": "idx_index",
+      "splice": "level_exact",
+      "transform": "log",
+      "final_lag_hours_wib": 17.5,
+      "max_carry_days": 10,
+      "min_overlap_corr": null,
+      "definition": "IHSG closing (IDX GetIndexSummary, IndexCode COMPOSITE). Same definition as Bloomberg JCI -> exact anchor check.",
+      "idx_index_code": "COMPOSITE"
+    },
+    "USDIDR BGN Curncy": {
+      "required": true,
+      "provider": "sheet_csv",
+      "splice": "chain_return",
+      "transform": "log",
+      "final_lag_hours_wib": 32,
+      "max_carry_days": 5,
+      "min_overlap_corr": 0.8,
+      "definition": "Yahoo IDR=X (USD/IDR) ADJUSTED close, delivered through a Google Sheet (apps_script/yahoo_feed.gs) as published CSV. UNVERIFIED live.",
+      "csv_url_env": "SRC_YAHOO_SHEET_CSV",
+      "column": "USDIDR BGN Curncy",
+      "decimal": "."
+    },
+    "CO1 Comdty": {
+      "required": true,
+      "provider": "sheet_csv",
+      "splice": "chain_return",
+      "transform": "log",
+      "final_lag_hours_wib": 32,
+      "max_carry_days": 5,
+      "min_overlap_corr": 0.8,
+      "definition": "Yahoo BZ=F (Brent front-month) ADJUSTED close, delivered through a Google Sheet (apps_script/yahoo_feed.gs) as published CSV. UNVERIFIED live.",
+      "csv_url_env": "SRC_YAHOO_SHEET_CSV",
+      "column": "CO1 Comdty",
+      "decimal": "."
+    },
+    "XAU Curncy": {
+      "required": true,
+      "provider": "stooq",
+      "splice": "chain_return",
+      "transform": "log",
+      "final_lag_hours_wib": 32,
+      "max_carry_days": 5,
+      "min_overlap_corr": 0.85,
+      "definition": "Stooq XAUUSD close. VERIFIED parse; return corr vs stored 0.93 (40d).",
+      "url": "https://stooq.com/q/d/?s=xauusd",
+      "column": "Close"
+    },
+    "XW1 Comdty": {
+      "required": true,
+      "provider": "stooq",
+      "splice": "chain_return",
+      "transform": "log",
+      "final_lag_hours_wib": 32,
+      "max_carry_days": 5,
+      "min_overlap_corr": 0.45,
+      "definition": "Stooq LQ.F ICE Newcastle Coal close. VERIFIED parse; return corr vs stored only 0.57, level ratio 0.96 - thinly traded, noisy.",
+      "url": "https://stooq.com/q/d/?s=lq.f",
+      "column": "Close"
+    },
+    "KO1 Comdty": {
+      "required": true,
+      "provider": "mpoc",
+      "splice": "chain_return",
+      "transform": "log",
+      "final_lag_hours_wib": 32,
+      "max_carry_days": 5,
+      "min_overlap_corr": null,
+      "definition": "MPOC daily 'Settlement Price RM' (BMD CPO futures; page keeps only the last ~10 pricing days). Parser VERIFIED on saved page; values match stored KO1 exactly on 4 of 10 days, but stored KO1 dates are inconsistent by up to 1 day vs MPOC (lag-0 return corr -0.03, lag-1 0.64, n<=9) -> definition check DISABLED (overlap too short); junction may carry one day of misalignment.",
+      "url": "https://www.mpoc.org.my/market-insight/daily-palm-oil-prices/",
+      "table_header_contains": "Pricing Date",
+      "value_header": "Settlement Price",
+      "date_format": "%d %b %y"
+    },
+    "LMNIDS03 LME Comdty": {
+      "required": true,
+      "provider": "westmetall",
+      "splice": "chain_return",
+      "transform": "log",
+      "final_lag_hours_wib": 24,
+      "max_carry_days": 5,
+      "min_overlap_corr": 0.55,
+      "definition": "Westmetall LME Nickel cash-settlement. VERIFIED parse; return corr vs stored 0.70 (195d).",
+      "url": "https://www.westmetall.com/en/markdaten.php?action=table&field=LME_Ni_cash",
+      "column": "LME Nickel Cash-Settlement"
+    },
+    "IBPRCPI Index": {
+      "required": true,
+      "provider": "phei",
+      "splice": "chain_return",
+      "transform": "log",
+      "final_lag_hours_wib": 18,
+      "max_carry_days": 5,
+      "min_overlap_corr": null,
+      "definition": "PHEI INDOBeX Government CLEAN PRICE (daily; page shows 1 day only). Level scale differs from IBPRCPI (114.5 vs 118.6) but YTD change matches (-5.75% vs -5.80%) -> chain-linked on returns.",
+      "row_name": "INDOBeX Government Clean Price",
+      "closed_calendar": "idx"
+    },
+    "GTIDR1Y Govt": {
+      "required": true,
+      "provider": "investing",
+      "splice": "chain_diff",
+      "transform": "diff",
+      "final_lag_hours_wib": 20,
+      "max_carry_days": 5,
+      "min_overlap_corr": 0.5,
+      "definition": "Investing.com ID 1Y govt yield (%). UNVERIFIED live. Pipeline uses first difference for this series.",
+      "url": "https://id.investing.com/rates-bonds/indonesia-1-year-bond-yield-historical-data",
+      "decimal": ",",
+      "closed_calendar": "idx"
+    }
+  },
+  "equity_default": {
+    "required": false,
+    "provider": "idx_stock",
+    "splice": "level_exact",
+    "final_lag_hours_wib": 17.5,
+    "max_carry_days": 10
+  }
+}
