@@ -42,3 +42,13 @@ setahu saya **tidak** didukung GOOGLEFINANCE; uji sendiri (jika sel menampilkan 
 | `FAILED_STALE` | feed tidak diperbarui >2 hari kerja | cek tab `status`, jalankan `refreshYahooFeed` manual, cek trigger |
 | `FAILED_DIAG` | seri tidak cocok dengan riwayat (korelasi < 0,8) | kirim angka korelasinya ke saya |
 | `last_error: HTTP 429` | Yahoo membatasi IP Google | tunggu dan jalankan ulang; jika terus, pakai sumber lain |
+
+## Jika di Summary muncul `SRC_YAHOO_SHEET_CSV is EMPTY`
+Artinya GitHub tidak memberikan secret itu ke job (di log, baris `SRC_YAHOO_SHEET_CSV:` kosong). Periksa satu per satu:
+1. Buka https://github.com/raihanzakiadani/dcc-garch-copula-monte-carlo-msar/settings/secrets/actions
+2. Pastikan Anda berada di tab **Secrets** (bukan **Variables**), bagian **Repository secrets** (bukan *Environment secrets*).
+3. Nama harus persis `SRC_YAHOO_SHEET_CSV` (huruf besar, garis bawah, tanpa spasi di akhir).
+4. Nilainya URL CSV lengkap yang diawali `https://docs.google.com/spreadsheets/d/e/` dan berakhir `output=csv`.
+5. Setelah menyimpan, jalankan ulang workflow. Secret tidak berlaku surut untuk run yang sudah selesai.
+Uji URL-nya di jendela incognito: harus mengunduh file **.csv** (bukan .xlsx, bukan halaman web). Jika yang terunduh .xlsx atau terbuka halaman web, ulangi
+**File > Share > Publish to web**, pilih tab `feed`, dan format **Comma-separated values (.csv)**.

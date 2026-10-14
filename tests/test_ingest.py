@@ -71,7 +71,7 @@ def idx_days(last, by, dates, bump=1.001):
     return days
 
 
-def make_registry(by, last, dates, scale=1.037, bump=1.002, end=None, broken=(), end_providers=("stooq",)):
+def make_registry(by, last, dates, scale=1.037, bump=1.002, end=None, broken=(), end_cols=("XAU Curncy", "XW1 Comdty")):
     """Source series for non-IDX instruments: SAME returns as stored history but a different level scale
     (like PHEI 114.5 vs 118.6) -> chain-linking must keep the stored level continuous."""
     reg = {}
@@ -84,7 +84,7 @@ def make_registry(by, last, dates, scale=1.037, bump=1.002, end=None, broken=(),
         for d in dates:
             cur *= bump
             s.loc[d] = cur * scale
-        if end is not None and CFG["instruments"][c]["provider"] in end_providers:
+        if end is not None and c in end_cols:
             s = s[[d <= end for d in s.index]]
 
         def fn(col, spec, ctx, s=s, c=c):
@@ -177,12 +177,14 @@ def test_diagnostic_rejects_wrong_series(world):
     x, last, by = world
     rng = np.random.default_rng(1)
     reg = make_registry(by, last, [D1])
-    good = reg["stooq"]
+    good = reg["investing"]
 
     def noisy(col, spec, ctx):
         s = good(col, spec, ctx)
-        return pd.Series(rng.normal(1000, 20, len(s)), index=s.index)     # unrelated random series
-    reg["stooq"] = noisy
+        if col != "XAU Curncy":
+            return s
+        return pd.Series(rng.normal(1000, 20, len(s)), index=s.index)     # unrelated random series for XAU only
+    reg["investing"] = noisy
     r = run(world, [D1], at(2026, 10, 12), reg=reg)
     assert r.status == FAILED and r.instruments["XAU Curncy"].status == "FAILED_DIAG"
 
@@ -248,13 +250,30 @@ def test_real_pages_parse():
 def test_real_pages_pass_definition_check_against_stored_history(base):
     """Measured on the user's real data: the thresholds in config must accept the real sources."""
     x, last, by = base
-    for col, fx, parser in (("XAU Curncy", "stooq_xauusd.html", web.parse_stooq), ("XW1 Comdty", "stooq_lqf.html", web.parse_stooq),
+    for col, fx, parser in (("XAU Curncy", "investing_xau_id.html", lambda h: web.parse_investing(h, ",")),
+                            ("XW1 Comdty", "investing_xw1_en.html", lambda h: web.parse_investing(h, ".")),
                             ("LMNIDS03 LME Comdty", "westmetall_ni.html", web.parse_westmetall)):
         s = parser((FIX / fx).read_text(encoding="utf-8"))
         st = pd.Series({d: r[col] for d, r in by.items() if r.get(col) is not None})
         j = pd.concat([st, s], axis=1, keys=["st", "src"], join="inner").dropna()
         rr = np.log(j).diff().dropna()
         assert rr.corr().iloc[0, 1] >= CFG["instruments"][col]["min_overlap_corr"], col
+
+
+def test_investing_real_pages_parse_id_and_en_formats():
+    xau = web.parse_investing((FIX / "investing_xau_id.html").read_text(encoding="utf-8"), ",")
+    assert len(xau) == 22 and xau.index.max() == dt.date(2026, 10, 13) and xau.loc[dt.date(2026, 10, 13)] == pytest.approx(4156.04)
+    assert xau.loc[dt.date(2026, 10, 9)] == pytest.approx(4194.46)                              # '4.194,46' -> thousands dot, decimal comma
+    xw1 = web.parse_investing((FIX / "investing_xw1_en.html").read_text(encoding="utf-8"), ".")
+    assert len(xw1) == 22 and xw1.loc[dt.date(2026, 10, 13)] == pytest.approx(150.35) and xw1.loc[dt.date(2026, 10, 8)] == pytest.approx(149.45)
+    with pytest.raises(ProviderError):                                                           # wrong locale must not give a wrong number
+        web.parse_investing((FIX / "investing_xau_id.html").read_text(encoding="utf-8"), ".")
+
+
+def test_xau_and_xw1_now_come_from_investing():
+    for col in ("XAU Curncy", "XW1 Comdty"):
+        k = CFG["instruments"][col]
+        assert k["provider"] == "investing" and "investing.com" in k["url"] and k["min_overlap_corr"] is not None
 
 
 def test_phei_store_idempotent_and_revision(tmp_path):

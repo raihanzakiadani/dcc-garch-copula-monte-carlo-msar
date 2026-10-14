@@ -13,7 +13,7 @@ flowchart LR
   subgraph GH[GitHub Actions - pipeline.yml]
     P[plan: mode dari hari WIB] --> F[fetch state terakhir yang valid]
     F --> C[capture PHEI - 1 hari saja]
-    C --> I[ingest: IDX, Sheet-Yahoo, Stooq, Westmetall, PHEI, Investing, MPOC]
+    C --> I[ingest: IDX, Sheet-Yahoo, Westmetall, PHEI, Investing, MPOC]
     I -->|FAILED| X[STOP - produksi tidak berubah]
     I --> M{mode}
     M -->|DAILY| H[Hybrid daily filtering - parameter tetap]

@@ -19,6 +19,10 @@
 
 - Data asli Anda: 81 kolom terpetakan 100% (9 makro/JCI + 71 saham `<KODE> IJ EQUITY`, tanpa duplikat/spasi aneh); hasil ingestion dibaca `readxl` identik dengan file asli (nama/urutan kolom, seluruh riwayat), dan return baris baru dihitung fungsi pipeline asli (finite, wajar). Saham kosong (WSKT) tidak dihidupkan kembali dari harga basi.
 
+- **Run live pertama (probe, 13 Okt 2026, dari GitHub-hosted runner):** OK: MPOC (10 baris, terbaru 12 Okt = 4.637), Westmetall (197 baris), PHEI (13 Okt = 114,3665),
+  Investing 1Y (22 baris, terbaru 6,721). GAGAL: IDX (HTTP 403 - sebabnya cookie FlareSolverr diputar ulang tanpa User-Agent-nya; sudah diperbaiki, belum diuji ulang live),
+  Stooq (halaman tantangan; diganti Investing), CSV Yahoo (secret `SRC_YAHOO_SHEET_CSV` kosong di job).
+
 ## 3. SIMULASI / BELUM TERUJI (jujur)
 - **FULL sampai selesai**: `rugarch`, `rmgarch`, `copula`, `moments`, `doRNG`, `shiny` tidak bisa dipasang di sandbox (tanpa akses CRAN). Hanya terbukti FULL meluncurkan pipeline dan gagal bersih. **Durasi FULL menurut Anda ±24 jam, melebihi batas 6 jam per job GitHub-hosted**: FULL dipecah per saham (`FULL_SHARDS`) atau jalan di runner self-hosted; eksekusi nyata tahap joint/stocks/merge pada model Anda belum teruji dan jumlah shard harus dikalibrasi (`docs/RUNTIME.md`).
 - **Pengambilan langsung dari IDX, Investing, MPOC, PHEI, dan Yahoo-via-Sheets (apakah Yahoo mengizinkan Apps Script Google: belum diketahui, bisa HTTP 429)**: tidak ada akses jaringan; parser Yahoo/Investing/MPOC tidak punya sampel halaman. Parser MPOC kini terverifikasi pada halaman yang Anda kirim (live belum); tanggal KO1 tersimpan tidak konsisten ≤1 hari terhadap MPOC.

@@ -24,9 +24,26 @@ def _err(e: Exception) -> str:
     return msg[:160]
 
 
-def probe(cfg: dict, header: list[str], env, idx_http_factory, web_client, registry=None, now=None) -> list[dict]:
+def flaresolverr_check() -> tuple[bool, str]:
+    """Is the FlareSolverr container up? (separates 'service not ready' from 'site blocked us')"""
+    import json, urllib.request
+    url = os.environ.get("FLARESOLVERR_URL", "").strip()
+    if not url:
+        return False, "FLARESOLVERR_URL not set"
+    base = url.rsplit("/v1", 1)[0] + "/"
+    try:
+        with urllib.request.urlopen(base, timeout=8) as r:  # noqa: S310
+            return True, str(json.loads(r.read().decode()).get("msg", "reachable"))[:80]
+    except Exception as e:  # noqa: BLE001
+        return False, f"not reachable ({type(e).__name__})"
+
+
+def probe(cfg: dict, header: list[str], env, idx_http_factory, web_client, registry=None, now=None, flare_check=None) -> list[dict]:
     registry, now = registry or REGISTRY, now or now_utc()
     out: list[dict] = []
+    ok_f, msg_f = (flare_check or flaresolverr_check)()
+    out.append({"source": "FlareSolverr service", "provider": "flaresolverr", "ok": ok_f, "rows": "", "note": msg_f} if ok_f
+               else {"source": "FlareSolverr service", "provider": "flaresolverr", "ok": False, "error": msg_f})
     ds, inst = cfg["dataset"], cfg["instruments"]
     cols = header[1:]
     eq_cols = [c for c in cols if c not in inst and is_equity(c, ds["stock_pattern"])]

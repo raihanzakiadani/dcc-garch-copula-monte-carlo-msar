@@ -5,8 +5,8 @@
 | JCI Index + 71 saham IJ | IDX `GetIndexSummary`/`GetStockSummary` (mekanisme proyek lama) | dari kode lama, **belum dijalankan live** | JCI sama definisinya → cek anchor eksak | level_exact |
 | USDIDR BGN Curncy | Yahoo `IDR=X` adj close **via Google Sheet** (`apps_script/yahoo_feed.gs` → CSV terbit; lihat `docs/SHEETS_FEED.md`) | logika skrip teruji dengan JSON tiruan; **live belum** | belum ada sampel; BGN ≠ Yahoo | chain_return |
 | CO1 Comdty | Yahoo `BZ=F` adj close **via Google Sheet** (skrip yang sama) | logika skrip teruji dengan JSON tiruan; **live belum** | belum ada sampel | chain_return |
-| XAU Curncy | Stooq `xauusd` | **terverifikasi** pada halaman Anda | korelasi return 0,93 (40 hari), rasio level 1,0003 | chain_return |
-| XW1 Comdty | Stooq `lq.f` (ICE Newcastle Coal) | **terverifikasi** | korelasi return **0,57**, rasio level 0,96, volume tipis → **noisy / kemungkinan bukan seri yang sama** | chain_return |
+| XAU Curncy | Investing.com ID XAU/USD (pengganti Stooq yang diblokir dari GitHub) | **terverifikasi** pada halaman Anda; format `13/10/2026`, `4.156,04` | korelasi return 0,78 (19 hari), rasio level 1,001 | chain_return |
+| XW1 Comdty | Investing.com Newcastle Coal Futures | **terverifikasi** | korelasi 0,996; 17/19 hari persis sama dengan Bloomberg | chain_return |
 | KO1 Comdty | MPOC daily palm oil (`Settlement Price RM`, tabel 10 hari terakhir) | **terverifikasi** pada halaman Anda | nilai identik dengan KO1 pada 4 dari 10 hari, tetapi tanggal KO1 tersimpan bergeser ≤1 hari terhadap MPOC dan ada nilai basi; korelasi lag-0 −0,03, lag-1 0,64 (n≤9) → **cek definisi dinonaktifkan** (sampel terlalu pendek); titik sambung bisa membawa selisih penanggalan 1 hari | chain_return |
 | LMNIDS03 LME Comdty | Westmetall `LME_Ni_cash` | **terverifikasi** | korelasi return **0,70** (195 hari); kolom Cash-Settlement ≈ 3M; bukan persis seri Bloomberg | chain_return |
 | IBPRCPI Index | PHEI "INDOBeX Government **Clean Price**" | **terverifikasi** (1 hari saja) | level 114,5 vs 118,6 (skala beda) tetapi perubahan YTD cocok (−5,75% vs −5,80%) → seri keluarga sama, di-chain pada return | chain_return |

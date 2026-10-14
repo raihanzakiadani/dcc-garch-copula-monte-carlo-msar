@@ -93,27 +93,27 @@
     },
     "XAU Curncy": {
       "required": true,
-      "provider": "stooq",
+      "provider": "investing",
       "splice": "chain_return",
       "transform": "log",
       "final_lag_hours_wib": 32,
       "max_carry_days": 5,
-      "min_overlap_corr": 0.85,
-      "definition": "Stooq XAUUSD close. VERIFIED parse; return corr vs stored 0.93 (40d).",
-      "url": "https://stooq.com/q/d/?s=xauusd",
-      "column": "Close"
+      "min_overlap_corr": 0.65,
+      "definition": "Investing.com ID XAU/USD close. VERIFIED parse on saved page; return corr vs stored Bloomberg history 0.78 (n=19, mean |diff| 0.35%/day; Stooq measured 0.93 over 40d but is blocked from GitHub). Threshold 0.65 only detects a broken/wrong feed.",
+      "url": "https://id.investing.com/currencies/xau-usd-historical-data",
+      "decimal": ","
     },
     "XW1 Comdty": {
       "required": true,
-      "provider": "stooq",
+      "provider": "investing",
       "splice": "chain_return",
       "transform": "log",
       "final_lag_hours_wib": 32,
       "max_carry_days": 5,
-      "min_overlap_corr": 0.45,
-      "definition": "Stooq LQ.F ICE Newcastle Coal close. VERIFIED parse; return corr vs stored only 0.57, level ratio 0.96 - thinly traded, noisy.",
-      "url": "https://stooq.com/q/d/?s=lq.f",
-      "column": "Close"
+      "min_overlap_corr": 0.9,
+      "definition": "Investing.com Newcastle Coal Futures close. VERIFIED parse; return corr vs stored history 0.996 and 17/19 days EXACTLY equal -> same series as Bloomberg XW1.",
+      "url": "https://www.investing.com/commodities/newcastle-coal-futures-historical-data",
+      "decimal": "."
     },
     "KO1 Comdty": {
       "required": true,

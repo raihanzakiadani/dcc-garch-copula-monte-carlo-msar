@@ -32,7 +32,7 @@ def idx_days_all():
 
 
 def test_probe_reports_ok_and_failures_without_leaking_secrets():
-    rows = probe(T.CFG, HEADER, {}, lambda: T.FakeIdx(idx_days_all()), Web(), fake_registry(fail=["XAU Curncy"]), NOW)
+    rows = probe(T.CFG, HEADER, {}, lambda: T.FakeIdx(idx_days_all()), Web(), fake_registry(fail=["XAU Curncy"]), NOW, flare_check=lambda: (True, "ready"))
     by = {r["source"]: r for r in rows}
     assert by["JCI Index"]["ok"] and by["JCI Index"]["last_date"] == "2026-10-12"
     stock = next(r for r in rows if r["provider"] == "idx_stock")
@@ -44,6 +44,13 @@ def test_probe_reports_ok_and_failures_without_leaking_secrets():
 
 
 def test_probe_idx_down_is_reported_not_raised():
-    rows = probe(T.CFG, HEADER, {}, lambda: T.FakeIdx({}, fail=True), Web(), fake_registry(), NOW)
+    rows = probe(T.CFG, HEADER, {}, lambda: T.FakeIdx({}, fail=True), Web(), fake_registry(), NOW, flare_check=lambda: (True, "ready"))
     assert any(r["provider"] == "idx" and not r["ok"] for r in rows)
     assert all(r["ok"] for r in rows if r["provider"] not in ("idx",))
+
+
+def test_probe_reports_flaresolverr_down_and_empty_secret_clearly():
+    rows = probe(T.CFG, HEADER, {}, lambda: T.FakeIdx(idx_days_all()), Web(), None, NOW, flare_check=lambda: (False, "not reachable (URLError)"))
+    by = {r["source"]: r for r in rows}
+    assert by["FlareSolverr service"]["ok"] is False and "not reachable" in by["FlareSolverr service"]["error"]
+    assert "SRC_YAHOO_SHEET_CSV is EMPTY" in by["USDIDR BGN Curncy"]["error"] and "Secrets* tab" in by["USDIDR BGN Curncy"]["error"]

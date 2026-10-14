@@ -34,6 +34,9 @@ def _phei(col, spec, ctx):
 
 
 def _sheet_csv(col, spec, ctx):
+    if not str(ctx["env"].get(spec["csv_url_env"], "")).strip():
+        raise ProviderError(f"{spec['csv_url_env']} is EMPTY in this job: add it under GitHub > Settings > Secrets and variables > Actions > "
+                            f"the *Secrets* tab (a Variable does not work), exact name, then re-run")
     df = fetch_sheet_csv(ctx["env"].get(spec["csv_url_env"], ""), [spec.get("column", col)], ctx["http"].get_text,
                          spec.get("decimal", "."), spec.get("date_format"))
     if spec.get("column", col) != col and spec["column"] in df.columns:
