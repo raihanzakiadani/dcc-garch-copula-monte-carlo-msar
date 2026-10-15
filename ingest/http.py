@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 
 from .common import ProviderError, log
 
@@ -62,7 +63,7 @@ class WebClient:
                     headers={"Content-Type": "application/json"}), timeout=75)
         data = resp.json()
         if data.get("status") != "ok":
-            raise ProviderError("FlareSolverr could not solve the challenge")
+            raise ProviderError(f"FlareSolverr could not solve the challenge: {str(data.get('message') or data.get('status'))[:110]}")
         sol = data["solution"]
         if int(sol.get("status", 0)) != 200:
             raise ProviderError(f"HTTP {sol.get('status')} via FlareSolverr")
@@ -74,9 +75,14 @@ class WebClient:
             return body
         if not self._flare:
             raise ProviderError("blocked or failed and no FLARESOLVERR_URL configured")
-        try:
-            return self._via_flare(url)
-        except ProviderError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            raise ProviderError(f"FlareSolverr request failed: {type(e).__name__}") from None
+        last: ProviderError | None = None
+        for delay in (0, 8, 20):                     # solving a Cloudflare challenge is probabilistic: retry before giving up
+            if delay:
+                time.sleep(delay)
+            try:
+                return self._via_flare(url)
+            except ProviderError as e:
+                last = e
+            except Exception as e:  # noqa: BLE001
+                last = ProviderError(f"FlareSolverr request failed: {type(e).__name__}")
+        raise ProviderError(f"{last} (after 3 attempts)")

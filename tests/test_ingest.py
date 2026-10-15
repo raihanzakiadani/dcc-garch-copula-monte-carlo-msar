@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from ingest.common import FAILED, PARTIAL_SUCCESS, SUCCESS, UP_TO_DATE, WIB, ProviderError, load_config  # noqa: E402
-from ingest.merge import read_state  # noqa: E402
+from ingest.merge import read_state, weekdays_between  # noqa: E402
 from ingest.providers import web  # noqa: E402
 from ingest import phei_store  # noqa: E402
 from ingest.run_ingest import eligible_date, run_ingest  # noqa: E402
@@ -100,11 +100,28 @@ def make_registry(by, last, dates, scale=1.037, bump=1.002, end=None, broken=(),
     return {p: dispatch(p) for p in {s["provider"] for s in CFG["instruments"].values()} - {"idx_index"}}
 
 
-def run(world, dates, now, reg=None, idx=None, **kw):
+import copy  # noqa: E402
+CFG_BLOCK = copy.deepcopy(CFG)
+CFG_BLOCK["ingest"]["on_required_failure"] = "block"           # alternative policy: write no row, catch up when the source recovers
+
+
+def run(world, dates, now, reg=None, idx=None, cfg=None, **kw):
     x, last, by = world
     reg = reg or make_registry(by, last, dates, **kw)
     idx = idx or FakeIdx(idx_days(last, by, dates))
-    return run_ingest(str(x), CFG, {}, lambda: idx, {"http": None, "phei_store": None}, reg, now)
+    return run_ingest(str(x), cfg or CFG, {}, lambda: idx, {"http": None, "phei_store": None}, reg, now)
+
+
+def raw_cells(path):
+    from openpyxl import load_workbook
+    rows = list(load_workbook(path, read_only=True).worksheets[0].iter_rows(values_only=True))
+    return rows[0], rows[1:]
+
+
+def cell(path, date, col):
+    hdr, rows = raw_cells(path)
+    row = next(r for r in rows if r[0].date() == date)
+    return row[list(hdr).index(col)]
 
 
 # --------------------------------------------------------------------------- timing
@@ -159,55 +176,10 @@ def test_two_days_incl_weekend_gap(world):
 
 
 # --------------------------------------------------------------------------- failures
-@pytest.mark.parametrize("broken", ["IBPRCPI Index", "XAU Curncy", "GTIDR1Y Govt"])
-def test_required_source_down_is_FAILED_and_file_untouched(world, broken):
-    before = md5(world[0])
-    r = run(world, [D1], at(2026, 10, 12), broken=[broken])
-    assert r.status == FAILED and md5(world[0]) == before
-    assert r.instruments[broken].status == "FAILED"
-
-
 def test_idx_down_is_FAILED(world):
     x, last, by = world
     r = run(world, [D1], at(2026, 10, 12), idx=FakeIdx({}, fail=True))
     assert r.status == FAILED
-
-
-def test_diagnostic_rejects_wrong_series(world):
-    x, last, by = world
-    rng = np.random.default_rng(1)
-    reg = make_registry(by, last, [D1])
-    good = reg["investing"]
-
-    def noisy(col, spec, ctx):
-        s = good(col, spec, ctx)
-        if col != "XAU Curncy":
-            return s
-        return pd.Series(rng.normal(1000, 20, len(s)), index=s.index)     # unrelated random series for XAU only
-    reg["investing"] = noisy
-    r = run(world, [D1], at(2026, 10, 12), reg=reg)
-    assert r.status == FAILED and r.instruments["XAU Curncy"].status == "FAILED_DIAG"
-
-
-def test_stale_feed_is_not_carried_forever(world):
-    x, last, by = world
-    r = run(world, [D1, D2, dt.date(2026, 10, 13), dt.date(2026, 10, 14)], at(2026, 10, 16), end=last)
-    assert r.status in (FAILED, PARTIAL_SUCCESS)
-    assert r.instruments["XAU Curncy"].status == "FAILED_STALE"
-    assert len(r.new_dates) <= CFG["dataset"]["tail_carry_days"]
-
-
-def test_phei_missing_day_on_trading_day_is_failure_not_carry(world):
-    x, last, by = world
-    reg = make_registry(by, last, [D1])
-    ph = reg["phei"]
-
-    def only_old(col, spec, ctx):
-        s = ph(col, spec, ctx)
-        return s[[d <= last for d in s.index]]       # capture missed 10-09
-    reg["phei"] = only_old
-    r = run(world, [D1], at(2026, 10, 12), reg=reg)
-    assert r.instruments["IBPRCPI Index"].status == "FAILED_MISSING" and r.status == FAILED
 
 
 def test_optional_equity_absent_stays_blank(world):
@@ -251,7 +223,7 @@ def test_real_pages_pass_definition_check_against_stored_history(base):
     """Measured on the user's real data: the thresholds in config must accept the real sources."""
     x, last, by = base
     for col, fx, parser in (("XAU Curncy", "investing_xau_id.html", lambda h: web.parse_investing(h, ",")),
-                            ("XW1 Comdty", "investing_xw1_en.html", lambda h: web.parse_investing(h, ".")),
+                            ("XW1 Comdty", "investing_xw1_id.html", lambda h: web.parse_investing(h, ",")),
                             ("LMNIDS03 LME Comdty", "westmetall_ni.html", web.parse_westmetall)):
         s = parser((FIX / fx).read_text(encoding="utf-8"))
         st = pd.Series({d: r[col] for d, r in by.items() if r.get(col) is not None})
@@ -394,33 +366,12 @@ def test_missing_values_are_written_as_literal_NA_like_the_history(world):
     assert read_state(x)["by_date"][D1]["BBCA IJ EQUITY"] is None                      # and our reader still sees it as missing
 
 
-def test_real_phei_seed_chains_from_last_stored_day_and_gap_is_detected(world, tmp_path):
-    """seed/phei_history.csv = the two REAL PHEI values from the user's saved page (8 & 9 Oct 2026)."""
-    from ingest.fetchers import REGISTRY
-    x, last, by = world
-    store = ROOT / "seed" / "phei_history.csv"
-    reg = make_registry(by, last, [D1])
-    reg["phei"] = REGISTRY["phei"]                                                    # REAL provider reading the seed store
-    idx = FakeIdx(idx_days(last, by, [D1]))
-    r = run_ingest(str(x), CFG, {}, lambda: idx, {"http": None, "phei_store": str(store)}, reg, at(2026, 10, 12))
-    assert r.status == SUCCESS, (r.reason, r.instruments["IBPRCPI Index"].detail)
-    expect = by[last]["IBPRCPI Index"] * 114.5095 / 114.4633
-    assert read_state(x)["by_date"][D1]["IBPRCPI Index"] == pytest.approx(expect, rel=1e-9)
-    # a day later with no PHEI capture in between => explicit failure, never a carried/guessed value
-    x2 = tmp_path / "gap.xlsx"; shutil.copy2(world[0], x2)
-    shutil.copy2(SEED, x2)
-    days = idx_days(last, by, [D1, D2, dt.date(2026, 10, 13)])
-    r2 = run_ingest(str(x2), CFG, {}, lambda: FakeIdx(days), {"http": None, "phei_store": str(store)},
-                    {**make_registry(by, last, [D1, D2, dt.date(2026, 10, 13)]), "phei": REGISTRY["phei"]}, at(2026, 10, 14))
-    assert r2.instruments["IBPRCPI Index"].status == "FAILED_MISSING" and r2.new_dates == ["2026-10-09"]
-
-
 def test_release_fetch_seeds_phei_history(tmp_path):
     import subprocess, os
     env = {**os.environ, "GH_BIN": str(ROOT / "tests/fake_gh.py"), "FAKE_GH_DIR": str(tmp_path / "gh")}
     w = tmp_path / "w"
     r = subprocess.run([sys.executable, str(ROOT / "scripts/release.py"), "fetch", "--work", str(w), "--repo", "o/r", "--seed", str(SEED)], env=env, capture_output=True, text=True)
-    assert r.returncode == 0 and (w / "phei_history.csv").read_text().count("\n") == 3
+    assert r.returncode == 0 and (w / "phei_history.csv").read_text().count("\n") == 5          # header + 4 real PHEI values
 
 
 def test_ingest_summary_renders(tmp_path):
@@ -431,3 +382,213 @@ def test_ingest_summary_renders(tmp_path):
     (tmp_path / "ingest_result.json").write_text(json.dumps(res.to_json(), default=str))
     out = subprocess.run([sys.executable, str(ROOT / "scripts/ingest_summary.py"), str(tmp_path)], capture_output=True, text=True).stdout
     assert "ingest status **SUCCESS**" in out and "Last rows of raw_data.xlsx" in out and "2026-10-09" in out and "| IBPRCPI Index |" in out
+
+
+def test_investing_fallback_url_is_used_when_main_fails_and_errors_are_combined():
+    from ingest.fetchers import REGISTRY
+    xau_id = (FIX / "investing_xau_id.html").read_text(encoding="utf-8")
+
+    class Http:
+        def __init__(self, ok_url=None): self.ok_url, self.seen = ok_url, []
+        def get_text(self, url):
+            self.seen.append(url)
+            if url == self.ok_url: return xau_id
+            raise ProviderError("FlareSolverr could not solve the challenge: timeout")
+    spec = {"url": "https://main.example/x", "decimal": ".", "fallbacks": [{"url": "https://fallback.example/x", "decimal": ","}]}
+    h = Http(ok_url="https://fallback.example/x")
+    s = REGISTRY["investing"]("XAU Curncy", spec, {"http": h})
+    assert h.seen == ["https://main.example/x", "https://fallback.example/x"] and s.loc[dt.date(2026, 10, 13)] == pytest.approx(4156.04)
+    with pytest.raises(ProviderError) as e:
+        REGISTRY["investing"]("XAU Curncy", spec, {"http": Http()})
+    assert str(e.value).count("could not solve") == 2                       # both attempts reported
+
+
+def test_webclient_retries_flaresolverr_and_reports_its_message(monkeypatch):
+    import ingest.http as H
+    monkeypatch.setattr(H.time, "sleep", lambda s: None)
+    c = H.WebClient.__new__(H.WebClient); c._flare = "http://x/v1"; c._direct = lambda url, h: None
+    calls = []
+    def via(url):
+        calls.append(url)
+        if len(calls) < 3: raise ProviderError("FlareSolverr could not solve the challenge: timeout")
+        return "<html>ok</html>"
+    c._via_flare = via
+    assert c.get_text("https://www.investing.com/x") == "<html>ok</html>" and len(calls) == 3
+    calls.clear(); c._via_flare = lambda url: (_ for _ in ()).throw(ProviderError("FlareSolverr could not solve the challenge: Cloudflare detected"))
+    with pytest.raises(ProviderError) as e:
+        c.get_text("https://www.investing.com/x")
+    assert "Cloudflare detected" in str(e.value) and "after 3 attempts" in str(e.value)
+
+
+# =========================================================== required-instrument gaps: NA policy (default) vs block
+@pytest.mark.parametrize("broken", ["IBPRCPI Index", "XAU Curncy", "GTIDR1Y Govt"])
+def test_required_source_down_writes_NA_and_is_never_SUCCESS(world, broken):
+    x, last, by = world
+    r = run(world, [D1], at(2026, 10, 12), broken=[broken])
+    assert r.status == PARTIAL_SUCCESS and r.new_dates == ["2026-10-09"]
+    assert cell(x, D1, broken) == "NA"                                              # house convention, literal text
+    assert isinstance(cell(x, D1, "JCI Index"), float)                              # everything else is a real number
+    assert r.instruments[broken].status == "FAILED" and r.na_written == {broken: ["2026-10-09"]}
+    assert any(broken in w and "NA" in w for w in r.warnings)
+
+
+@pytest.mark.parametrize("broken", ["IBPRCPI Index", "XAU Curncy", "GTIDR1Y Govt"])
+def test_block_policy_writes_no_row_and_leaves_file_untouched(world, broken):
+    before = md5(world[0])
+    r = run(world, [D1], at(2026, 10, 12), broken=[broken], cfg=CFG_BLOCK)
+    assert r.status == FAILED and md5(world[0]) == before
+
+
+def test_wrong_series_is_rejected_and_written_as_NA_not_as_wrong_data(world):
+    x, last, by = world
+    rng = np.random.default_rng(1)
+    reg = make_registry(by, last, [D1]); good = reg["investing"]
+
+    def noisy(col, spec, ctx):
+        s = good(col, spec, ctx)
+        return s if col != "XAU Curncy" else pd.Series(rng.normal(1000, 20, len(s)), index=s.index)
+    reg["investing"] = noisy
+    r = run(world, [D1], at(2026, 10, 12), reg=reg)
+    assert r.instruments["XAU Curncy"].status == "FAILED_DIAG" and r.status == PARTIAL_SUCCESS
+    assert cell(x, D1, "XAU Curncy") == "NA"
+    r2 = run({**{}, 0: 0} and (shutil.copy2(SEED, x) and world), [D1], at(2026, 10, 12), reg=reg, cfg=CFG_BLOCK)
+    assert r2.status == FAILED
+
+
+def test_dead_feed_gets_NA_after_tail_carry_then_stops_after_max_consecutive_NA(world):
+    x, last, by = world
+    dates = list(weekdays_between(dt.date(2026, 10, 9), dt.date(2026, 10, 21)))      # 9 weekdays; XAU/XW1 feeds stop at the last stored day
+    r = run(world, dates, at(2026, 10, 22), end=last)
+    tail = CFG["dataset"]["tail_carry_days"]; mx = CFG["ingest"]["max_consecutive_na"]
+    assert r.status == PARTIAL_SUCCESS and len(r.new_dates) == tail + mx and len(r.blocked_dates) == len(dates) - tail - mx
+    assert len(r.na_written["XAU Curncy"]) == mx
+    assert cell(x, D1, "XAU Curncy") != "NA" and cell(x, dt.date(2026, 10, 13), "XAU Curncy") == "NA"     # 2 carried days, then NA
+    assert "more than 5 NA days in a row" in r.reason                                                       # then it stops: a dead feed cannot go on silently
+
+
+def test_short_dead_feed_is_NA_but_does_not_stop_the_run(world):
+    x, last, by = world
+    dates = list(weekdays_between(dt.date(2026, 10, 9), dt.date(2026, 10, 16)))
+    r = run(world, dates, at(2026, 10, 19), end=last)
+    assert r.status == PARTIAL_SUCCESS and len(r.new_dates) == 6 and r.blocked_dates == []
+    assert r.instruments["XAU Curncy"].status == "FAILED_NA" and len(r.na_written["XAU Curncy"]) == 4
+
+
+def test_phei_gap_day_is_NA_and_the_chain_resumes_on_the_next_print(world):
+    x, last, by = world
+    D3 = dt.date(2026, 10, 13)
+    reg = make_registry(by, last, [D1, D2, D3]); ph = reg["phei"]
+
+    def gap(col, spec, ctx):
+        s = ph(col, spec, ctx)
+        return s[[(d <= last) or d == D3 for d in s.index]]                          # capture missed 9 and 12 Oct, back on 13 Oct
+    reg["phei"] = gap
+    r = run(world, [D1, D2, D3], at(2026, 10, 14), reg=reg, idx=FakeIdx(idx_days(last, by, [D1, D2, D3])))
+    assert r.new_dates == ["2026-10-09", "2026-10-12", "2026-10-13"] and r.status == PARTIAL_SUCCESS
+    assert cell(x, D1, "IBPRCPI Index") == "NA" and cell(x, D2, "IBPRCPI Index") == "NA"
+    src = gap("IBPRCPI Index", None, None)
+    expect = by[last]["IBPRCPI Index"] * src.loc[D3] / src.loc[max(d for d in src.index if d <= last)]
+    assert cell(x, D3, "IBPRCPI Index") == pytest.approx(expect, rel=1e-9)            # one multi-day return across the NA gap, no jump artefact
+    # block policy: nothing is written from the first gap day on
+    shutil.copy2(SEED, x)
+    r2 = run(world, [D1, D2, D3], at(2026, 10, 14), reg=reg, idx=FakeIdx(idx_days(last, by, [D1, D2, D3])), cfg=CFG_BLOCK)
+    assert r2.status == FAILED and r2.new_dates == []
+
+
+def test_real_phei_seed_chains_and_a_missing_capture_becomes_NA(world, tmp_path):
+    """seed/phei_history.csv = the two REAL PHEI values from the user's saved page (8 & 9 Oct 2026)."""
+    from ingest.fetchers import REGISTRY
+    x, last, by = world
+    store = ROOT / "seed" / "phei_history.csv"
+    reg = make_registry(by, last, [D1]); reg["phei"] = REGISTRY["phei"]
+    r = run_ingest(str(x), CFG, {}, lambda: FakeIdx(idx_days(last, by, [D1])), {"http": None, "phei_store": str(store)}, reg, at(2026, 10, 12))
+    assert r.status == SUCCESS, (r.reason, r.instruments["IBPRCPI Index"].detail)
+    assert cell(x, D1, "IBPRCPI Index") == pytest.approx(by[last]["IBPRCPI Index"] * 114.5095 / 114.4633, rel=1e-9)
+    # the full seed now also holds the live values of 12 and 13 Oct, so the whole gap 9..13 Oct chains with REAL prints
+    x3 = tmp_path / "full.xlsx"; shutil.copy2(SEED, x3)
+    D3 = dt.date(2026, 10, 13)
+    days = idx_days(last, by, [D1, D2, D3])
+    regs = {**make_registry(by, last, [D1, D2, D3]), "phei": REGISTRY["phei"]}
+    r3 = run_ingest(str(x3), CFG, {}, lambda: FakeIdx(days), {"http": None, "phei_store": str(store)}, regs, at(2026, 10, 14))
+    assert r3.new_dates == ["2026-10-09", "2026-10-12", "2026-10-13"] and r3.instruments["IBPRCPI Index"].status != "FAILED_NA"
+    assert cell(x3, D3, "IBPRCPI Index") == pytest.approx(by[last]["IBPRCPI Index"] * 114.3665 / 114.4633, rel=1e-9)
+    # a store WITHOUT the 12/13 Oct captures leaves a hole: NA for the missing days
+    short = tmp_path / "short.csv"; short.write_text("date,value,kind\n2026-10-08,114.4633,previous\n2026-10-09,114.5095,last\n")
+    x2 = tmp_path / "gap.xlsx"; shutil.copy2(SEED, x2)
+    r2 = run_ingest(str(x2), CFG, {}, lambda: FakeIdx(days), {"http": None, "phei_store": str(short)}, regs, at(2026, 10, 14))
+    assert cell(x2, D1, "IBPRCPI Index") != "NA" and cell(x2, D2, "IBPRCPI Index") == "NA" and cell(x2, D3, "IBPRCPI Index") == "NA"
+    assert r2.instruments["IBPRCPI Index"].status == "FAILED_NA" and "no print for" in r2.instruments["IBPRCPI Index"].detail and r2.status == PARTIAL_SUCCESS
+
+
+def test_a_long_gap_is_filled_completely_not_just_one_day(world):
+    """From the last stored day up to the newest finalised weekday: every weekday gets a row (here 9 weekdays)."""
+    x, last, by = world
+    weekdays = [d for d in weekdays_between(dt.date(2026, 10, 9), dt.date(2026, 10, 21))]
+    assert len(weekdays) == 9
+    calls = []
+
+    class Spy(FakeIdx):
+        def get_json(self, path, params):
+            calls.append(params["date"]); return super().get_json(path, params)
+    r = run(world, weekdays, at(2026, 10, 22), idx=Spy(idx_days(last, by, weekdays)))
+    assert r.status == SUCCESS and r.new_dates == [d.isoformat() for d in weekdays]
+    assert {dt.datetime.strptime(c, "%Y%m%d").date() for c in calls} >= set(weekdays) | {last}      # IDX asked for EVERY day of the gap
+    hdr, rows = raw_cells(x)
+    assert [r_[0].date() for r_ in rows[-10:]] == [last] + weekdays                                  # contiguous, no weekday missing
+
+
+def test_gap_longer_than_a_source_window_is_reported_not_guessed(world):
+    x, last, by = world
+    weekdays = [d for d in weekdays_between(dt.date(2026, 10, 9), dt.date(2026, 10, 14))]
+    reg = make_registry(by, last, weekdays)
+    mp = reg["mpoc"]
+
+    def short_window(col, spec, ctx):                                                # MPOC only keeps ~10 pricing days: nothing on/before the last stored day
+        s = mp(col, spec, ctx)
+        return s[[d > last for d in s.index]]
+    reg["mpoc"] = short_window
+    r = run(world, weekdays, at(2026, 10, 15), reg=reg)
+    assert r.instruments["KO1 Comdty"].status == "FAILED_MISSING" and "on/before last stored date" in r.instruments["KO1 Comdty"].detail
+    assert cell(x, dt.date(2026, 10, 9), "KO1 Comdty") == "NA"                       # never a guessed jump
+
+
+def test_xw1_main_url_is_the_indonesian_page_with_english_fallback():
+    k = CFG["instruments"]["XW1 Comdty"]
+    assert k["url"] == "https://id.investing.com/commodities/newcastle-coal-futures-historical-data" and k["decimal"] == ","
+    assert k["fallbacks"][0]["url"].startswith("https://www.investing.com/") and k["fallbacks"][0]["decimal"] == "."
+    xw1 = web.parse_investing((FIX / "investing_xw1_id.html").read_text(encoding="utf-8"), ",")
+    assert len(xw1) == 22 and xw1.loc[dt.date(2026, 10, 13)] == pytest.approx(150.35) and xw1.loc[dt.date(2026, 10, 12)] == pytest.approx(149.35)
+
+
+def test_chain_base_older_than_last_stored_day_is_refused_when_the_stored_level_moved(world):
+    """The user completes the data to a later date than the newest PHEI print we hold: no silent double counting."""
+    x, last, by = world
+    reg = make_registry(by, last, [D1]); ph = reg["phei"]
+    old = last - dt.timedelta(days=3)
+
+    def stale_base(col, spec, ctx):
+        s = ph(col, spec, ctx)
+        return pd.Series([float(s.iloc[0])], index=[old]).combine_first(s[[d > last for d in s.index]])     # only an OLD print before D1
+    reg["phei"] = stale_base
+    r = run(world, [D1], at(2026, 10, 12), reg=reg)
+    assert r.instruments["IBPRCPI Index"].status == "FAILED_MISSING" and "double count" in r.instruments["IBPRCPI Index"].detail
+    assert cell(x, D1, "IBPRCPI Index") == "NA"
+
+
+def test_chain_base_older_is_fine_when_the_stored_level_did_not_move(world):
+    """Market-closed day: stored level flat since the base print (history convention), so the base still describes the same state."""
+    from openpyxl import load_workbook
+    x, last, by = world
+    wb = load_workbook(x); ws = wb.worksheets[0]; hdr = [c.value for c in ws[1]]; j = hdr.index("XAU Curncy") + 1
+    ws.cell(ws.max_row, j).value = ws.cell(ws.max_row - 1, j).value                                       # flat last day
+    wb.save(x)
+    st = read_state(x); last2, by2 = st["last_date"], st["by_date"]
+    reg = make_registry(by2, last2, [D1]); good = reg["investing"]
+    prev = last2 - dt.timedelta(days=1)
+
+    def no_print_on_last(col, spec, ctx):
+        s = good(col, spec, ctx)
+        return s[[d != last2 for d in s.index]] if col == "XAU Curncy" else s                              # source has nothing on the (flat) last day
+    reg["investing"] = no_print_on_last
+    r = run((x, last2, by2), [D1], at(2026, 10, 12), reg=reg)
+    assert r.instruments["XAU Curncy"].status != "FAILED_MISSING" and isinstance(cell(x, D1, "XAU Curncy"), float)

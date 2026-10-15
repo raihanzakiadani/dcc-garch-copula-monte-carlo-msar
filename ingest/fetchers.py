@@ -21,7 +21,15 @@ def _westmetall(col, spec, ctx):
 
 
 def _investing(col, spec, ctx):
-    return web.parse_investing(ctx["http"].get_text(spec["url"]), spec.get("decimal", "."))
+    """Main URL first, then optional fallbacks (other Investing domain/locale). The definition check in run_ingest still guards the series."""
+    tries = [(spec["url"], spec.get("decimal", "."))] + [(f["url"], f.get("decimal", ".")) for f in spec.get("fallbacks", [])]
+    errs = []
+    for url, dec in tries:
+        try:
+            return web.parse_investing(ctx["http"].get_text(url), dec)
+        except ProviderError as e:
+            errs.append(str(e)[:100])
+    raise ProviderError(" | ".join(errs))
 
 
 def _mpoc(col, spec, ctx):

@@ -38,7 +38,7 @@ def flaresolverr_check() -> tuple[bool, str]:
         return False, f"not reachable ({type(e).__name__})"
 
 
-def probe(cfg: dict, header: list[str], env, idx_http_factory, web_client, registry=None, now=None, flare_check=None) -> list[dict]:
+def probe(cfg: dict, header: list[str], env, idx_http_factory, web_client, registry=None, now=None, flare_check=None, last_date=None) -> list[dict]:
     registry, now = registry or REGISTRY, now or now_utc()
     out: list[dict] = []
     ok_f, msg_f = (flare_check or flaresolverr_check)()
@@ -58,7 +58,8 @@ def probe(cfg: dict, header: list[str], env, idx_http_factory, web_client, regis
         for c in idx_cols:
             ser = [(d, vals[d][c]) for d in got_days if c in vals.get(d, {})]
             if ser:
-                out.append({"source": c, "provider": "idx_index", "ok": True, "rows": len(ser), "last_date": str(ser[-1][0]), "last_value": ser[-1][1], "note": f"trading days seen: {len(got_days)} of {len(days)} weekdays"})
+                out.append({"source": c, "provider": "idx_index", "ok": True, "rows": len(ser), "last_date": str(ser[-1][0]), "last_value": ser[-1][1], "note": f"sampled the last {len(days)} weekdays only (probe is a connectivity check)",
+                            "gap": f"OK: one API call per day, so any gap up to max_catchup_days={cfg['dataset']['max_catchup_days']}"})
             else:
                 out.append({"source": c, "provider": "idx_index", "ok": False, "error": "IDX reachable but returned no index rows for the last weekdays (holiday window?)"})
         if got_days:
@@ -78,21 +79,27 @@ def probe(cfg: dict, header: list[str], env, idx_http_factory, web_client, regis
         try:
             if sp["provider"] == "phei":
                 p = parse_phei(web_client.get_text("https://www.phei.co.id/en-us/Data/Bond-Indexes"), sp.get("row_name", "INDOBeX Government Clean Price"))
-                out.append({"source": c, "provider": "phei", "ok": True, "rows": 2, "last_date": str(p["date"]), "last_value": p["last"], "note": f"previous={p['previous']} (page shows ONE day only)"})
+                out.append({"source": c, "provider": "phei", "ok": True, "rows": 2, "last_date": str(p["date"]), "last_value": p["last"], "note": f"previous={p['previous']} (page shows ONE day only)",
+                            "gap": "n/a: one day by design, captured daily (seed/phei_history.csv + capture)"})
                 continue
             s = registry[sp["provider"]](c, sp, ctx)
+            gap = ""
+            if last_date is not None:
+                gap = (f"OK: history reaches back to {s.index.min()}" if s.index.min() <= last_date
+                       else f"TOO SHORT: oldest {s.index.min()} is after last stored {last_date} - this gap cannot be bridged")
             out.append({"source": c, "provider": sp["provider"], "ok": True, "rows": int(len(s)), "last_date": str(s.index.max()), "last_value": float(s.iloc[-1]),
-                        "note": f"oldest in feed: {s.index.min()}"})
+                        "note": f"oldest in feed: {s.index.min()}", "gap": gap})
         except Exception as e:  # noqa: BLE001
             out.append({"source": c, "provider": sp["provider"], "ok": False, "error": _err(e)})
     return out
 
 
-def to_markdown(rows: list[dict]) -> str:
+def to_markdown(rows: list[dict], info: str = "") -> str:
     ok = sum(r["ok"] for r in rows)
-    lines = [f"## Export probe: {ok}/{len(rows)} sources OK", "", "| source | provider | result | rows | newest | value | note |", "|---|---|---|---|---|---|---|"]
+    lines = [f"## Export probe: {ok}/{len(rows)} sources OK", ""] + ([info, ""] if info else []) + \
+            ["| source | provider | result | rows | newest | value | can it fill the gap? | note |", "|---|---|---|---|---|---|---|---|"]
     for r in rows:
-        lines.append(f"| {r['source']} | {r['provider']} | {'OK' if r['ok'] else 'FAIL'} | {r.get('rows', '')} | {r.get('last_date', '')} | {r.get('last_value', '')} | {r.get('error') or r.get('note', '')} |")
+        lines.append(f"| {r['source']} | {r['provider']} | {'OK' if r['ok'] else 'FAIL'} | {r.get('rows', '')} | {r.get('last_date', '')} | {r.get('last_value', '')} | {r.get('gap', '')} | {r.get('error') or r.get('note', '')} |")
     return "\n".join(lines)
 
 
@@ -101,7 +108,8 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", default="seed/raw_data.xlsx")
     a = ap.parse_args(argv)
     cfg = load_config()
-    header = read_state(a.seed, cfg["dataset"]["dedupe_policy"])["header"]
+    st = read_state(a.seed, cfg["dataset"]["dedupe_policy"])
+    header, last_date = st["header"], st["last_date"]
     try:
         from .http import WebClient
         from .providers.idx import IdxHttp
@@ -110,8 +118,11 @@ def main(argv=None) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"cannot start HTTP client: {_err(e)}")
         return 1
-    rows = probe(cfg, header, os.environ, idx_factory, client)
-    md = to_markdown(rows)
+    rows = probe(cfg, header, os.environ, idx_factory, client, last_date=last_date)
+    today = now_utc().astimezone(WIB).date()
+    n_gap = sum(1 for _ in weekdays_between(last_date + dt.timedelta(days=1), today))
+    md = to_markdown(rows, f"Last date in {a.seed}: **{last_date}** | weekdays from then to today ({today}): **{n_gap}** to fill "
+                           f"(longest gap filled per run: {cfg['dataset']['max_catchup_days']} days).")
     print(md)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         open(os.environ["GITHUB_STEP_SUMMARY"], "a").write(md + "\n")

@@ -1,6 +1,7 @@
 name: fetch-test
 # DATA-ONLY tests (no R, no model, nothing is published, production is never touched).
 #   check=probe   can each source be reached and parsed right now?                 (~2 min, writes nothing)
+#   check=seed    validate seed/raw_data.xlsx (format, dates, NA convention) - run this after you replace the seed with your completed data
 #   check=ingest  run the real ingestion on a COPY of seed/raw_data.xlsx and show the new rows that would be appended;
 #                 the resulting file is attached to the run as artifact "ingest-test" (kept 3 days) for you to download and inspect
 on:
@@ -9,7 +10,7 @@ on:
       check:
         description: "Which data-only check"
         type: choice
-        options: [probe, ingest]
+        options: [probe, ingest, seed]
         default: probe
 permissions:
   contents: read
@@ -24,15 +25,19 @@ jobs:
     env:
       FLARESOLVERR_URL: http://localhost:8191/v1
       PROXY_URL: ${{ secrets.PROXY_URL }}
-      SRC_YAHOO_SHEET_CSV: ${{ secrets.SRC_YAHOO_SHEET_CSV }}
+      SRC_YAHOO_SHEET_CSV: ${{ secrets.SRC_YAHOO_SHEET_CSV || vars.SRC_YAHOO_SHEET_CSV }}
       TZ: Asia/Jakarta
     steps:
       - uses: actions/checkout@v4
-      - name: Wait for FlareSolverr
-        run: curl -fsS --retry 40 --retry-delay 2 --retry-connrefused --max-time 5 http://localhost:8191/ || echo "::warning::FlareSolverr not reachable yet"
+      - name: Wait for FlareSolverr (container needs time to start Chrome)
+        if: inputs.check != 'seed'
+        run: bash scripts/wait_flaresolverr.sh
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
+      - name: Validate seed/raw_data.xlsx
+        if: inputs.check == 'seed'
+        run: python scripts/check_seed.py seed/raw_data.xlsx
       - name: Probe every source
         if: inputs.check == 'probe'
         run: python -m ingest.probe --seed seed/raw_data.xlsx

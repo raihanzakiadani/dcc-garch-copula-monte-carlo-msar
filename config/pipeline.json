@@ -10,7 +10,7 @@
     "revision_rel_tolerance": 1e-09,
     "revision_lookback_days": 10,
     "anchor_rel_tolerance": 1e-06,
-    "max_catchup_days": 14,
+    "max_catchup_days": 45,
     "overlap_window_weekdays": 40,
     "overlap_min_n": 15,
     "max_abs_diff_yield_pp": 2.0,
@@ -51,7 +51,9 @@
   "ingest": {
     "required_failure_policy": "FAILED",
     "optional_failure_policy": "PARTIAL_SUCCESS",
-    "note": "Row calendar = every weekday (matches history: 0 missing weekdays since 2023). Closed-market days carry the last level forward (history convention), bounded by max_carry_days."
+    "note": "Row calendar = every weekday (matches history: 0 missing weekdays since 2023). Closed-market days carry the last level forward (history convention), bounded by max_carry_days. on_required_failure='na' (default): a required instrument with no usable value gets the text NA for that day (PARTIAL_SUCCESS, never SUCCESS), up to max_consecutive_na days in a row; 'block' writes no row so the gap is caught up when the source recovers. max_catchup_days = longest gap filled in one run (further limited by each source's history window).",
+    "on_required_failure": "na",
+    "max_consecutive_na": 5
   },
   "instruments": {
     "JCI Index": {
@@ -101,7 +103,13 @@
       "min_overlap_corr": 0.65,
       "definition": "Investing.com ID XAU/USD close. VERIFIED parse on saved page; return corr vs stored Bloomberg history 0.78 (n=19, mean |diff| 0.35%/day; Stooq measured 0.93 over 40d but is blocked from GitHub). Threshold 0.65 only detects a broken/wrong feed.",
       "url": "https://id.investing.com/currencies/xau-usd-historical-data",
-      "decimal": ","
+      "decimal": ",",
+      "fallbacks": [
+        {
+          "url": "https://www.investing.com/currencies/xau-usd-historical-data",
+          "decimal": "."
+        }
+      ]
     },
     "XW1 Comdty": {
       "required": true,
@@ -111,9 +119,15 @@
       "final_lag_hours_wib": 32,
       "max_carry_days": 5,
       "min_overlap_corr": 0.9,
-      "definition": "Investing.com Newcastle Coal Futures close. VERIFIED parse; return corr vs stored history 0.996 and 17/19 days EXACTLY equal -> same series as Bloomberg XW1.",
-      "url": "https://www.investing.com/commodities/newcastle-coal-futures-historical-data",
-      "decimal": "."
+      "definition": "Investing.com ID Newcastle Coal Futures close (main) with the English page as fallback. VERIFIED parse on both saved pages; return corr vs stored history 0.996 and 17/19 days EXACTLY equal -> same series as Bloomberg XW1. Note: the most recent day is revised after first display (148.90 vs 149.35 seen on two saves), hence the settle lag.",
+      "url": "https://id.investing.com/commodities/newcastle-coal-futures-historical-data",
+      "decimal": ",",
+      "fallbacks": [
+        {
+          "url": "https://www.investing.com/commodities/newcastle-coal-futures-historical-data",
+          "decimal": "."
+        }
+      ]
     },
     "KO1 Comdty": {
       "required": true,
@@ -164,7 +178,13 @@
       "definition": "Investing.com ID 1Y govt yield (%). UNVERIFIED live. Pipeline uses first difference for this series.",
       "url": "https://id.investing.com/rates-bonds/indonesia-1-year-bond-yield-historical-data",
       "decimal": ",",
-      "closed_calendar": "idx"
+      "closed_calendar": "idx",
+      "fallbacks": [
+        {
+          "url": "https://www.investing.com/rates-bonds/indonesia-1-year-bond-yield-historical-data",
+          "decimal": "."
+        }
+      ]
     }
   },
   "equity_default": {

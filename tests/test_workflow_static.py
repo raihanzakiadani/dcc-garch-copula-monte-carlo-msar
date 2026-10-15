@@ -49,3 +49,12 @@ def test_hosted_daily_cannot_start_full_fallback():
 def test_actionlint_clean():
     r = subprocess.run(["actionlint", *map(str, (ROOT / ".github/workflows").glob("*.yml"))], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_every_job_with_flaresolverr_waits_for_it():
+    import glob
+    for f in glob.glob(str(ROOT / ".github/workflows/*.yml")):
+        d = yaml.safe_load(open(f).read())
+        for name, job in d["jobs"].items():
+            if "flaresolverr" in (job.get("services") or {}):
+                assert "scripts/wait_flaresolverr.sh" in str(job["steps"]), f"{Path(f).name}:{name}"

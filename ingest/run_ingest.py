@@ -142,6 +142,16 @@ def run_ingest(xlsx: str, cfg: dict, env: dict | None = None, idx_http_factory=N
             r.status, r.detail = "FAILED_MISSING", f"source has no print on/before last stored date {last}"
             continue
         src_last[c] = float(before.iloc[-1])
+        b_date = before.index[-1]
+        if b_date != last:
+            # The chain base must describe the SAME state as the last stored row. If the newest source print is older than the last
+            # stored day and the stored level moved in between, chaining from it would count that move twice.
+            sv_b, sv_l = stored.get(b_date), stored.get(last)
+            if sv_b is None or sv_l is None or abs(sv_b - sv_l) > 1e-9 * max(1.0, abs(sv_l)):
+                r.status = "FAILED_MISSING"
+                r.detail = (f"newest source print on/before {last} is {b_date}, and the stored level changed since then: "
+                            f"chaining would double count that move (need a source print for {last})")
+                continue
         # overlap diagnostics on the transformed (return/diff) series
         win = [d for d in stored.index if d <= last and (last - d).days <= ds["overlap_window_weekdays"] * 7 // 5]
         j = pd.concat([stored.loc[win], s], axis=1, keys=["st", "src"], join="inner", sort=True).dropna()
@@ -175,6 +185,29 @@ def run_ingest(xlsx: str, cfg: dict, env: dict | None = None, idx_http_factory=N
 
     # ---------- build rows: every weekday, contiguous prefix of complete days ----------
     rows, blocked = [], False
+    # What to do when a REQUIRED instrument has no usable value for a day (outage, blocked, wrong series, dead feed, absurd jump):
+    #   "na"    write the text "NA" for that cell (house convention), keep going, never claim SUCCESS (PARTIAL_SUCCESS + warnings);
+    #           gives up (blocks) after max_consecutive_na days in a row so a dead feed cannot silently produce NA forever.
+    #   "block" write no row at all, so the gap is caught up automatically once the source recovers.
+    # JCI/IDX is never NA-filled: without it holidays cannot be told apart from outages.
+    policy = str(cfg.get("ingest", {}).get("on_required_failure", "block")).lower()
+    max_na = int(cfg.get("ingest", {}).get("max_consecutive_na", 5))
+    na_run = {c: 0 for c in cols}
+    na_cells: dict = {}
+
+    na_reason: dict = {}
+
+    def miss(c, d, why, bad, day_na, status=None, detail=None):
+        """A day-level gap must not switch the instrument off for the rest of the run (tomorrow it may print again)."""
+        if policy == "na" and c not in idx_cols and na_run[c] < max_na:
+            na_run[c] += 1
+            day_na.append(c)
+            na_reason[c] = detail or why
+            return
+        if status:
+            res.instruments[c].status, res.instruments[c].detail = status, detail or why
+        bad.append(f"{c}: {why}" + (f" (more than {max_na} NA days in a row)" if policy == "na" and c not in idx_cols else ""))
+
     carry_run = {c: 0 for c in cols}
     tail_run = {c: 0 for c in cols}
     blank_state = {c: by_date[last].get(c) is None for c in cols}     # last stored ROW blank (suspended/unlisted)
@@ -184,12 +217,12 @@ def run_ingest(xlsx: str, cfg: dict, env: dict | None = None, idx_http_factory=N
             if blocked:
                 res.blocked_dates.append(d.isoformat())
                 continue
-            row, bad, snap = {}, [], (dict(prev_level), dict(src_last), dict(carry_run), dict(tail_run))
+            row, bad, day_na, snap = {}, [], [], (dict(prev_level), dict(src_last), dict(carry_run), dict(tail_run), dict(na_run))
             for c in cols:
                 r, sp = res.instruments[c], spec_of(c)
                 if r.status.startswith("FAILED"):
                     if r.required:
-                        bad.append(f"{c}: {r.status}")
+                        miss(c, d, r.status, bad, day_na)
                     continue
                 v = series[c].get(d)
                 is_idx = sp["provider"] in ("idx_index", "idx_stock")
@@ -202,60 +235,68 @@ def run_ingest(xlsx: str, cfg: dict, env: dict | None = None, idx_http_factory=N
                         continue                                      # blank stays blank: never resurrect an old price
                     if sp.get("closed_calendar") == "idx":           # Indonesian-market series: no print is only OK on an IDX holiday
                         if trading is not None and d in trading:
-                            r.status, r.detail = "FAILED_MISSING", f"no print for {d} although IDX traded (capture missed?)"
                             if r.required:
-                                bad.append(f"{c}: FAILED_MISSING {d}")
+                                miss(c, d, f"FAILED_MISSING {d}", bad, day_na, "FAILED_MISSING", f"no print for {d} although IDX traded (capture missed?)")
                             continue
                     elif not is_idx and not (series[c].index > d).any():   # tail: cannot tell 'closed' from 'not published'
                         tail_run[c] += 1
                         if tail_run[c] > ds["tail_carry_days"]:
-                            r.status, r.detail = "FAILED_STALE", f"no print after {series[c].index.max()} (feed stale)"
                             if r.required:
-                                bad.append(f"{c}: FAILED_STALE")
+                                miss(c, d, "FAILED_STALE", bad, day_na, "FAILED_STALE", f"no print after {series[c].index.max()} (feed stale)")
                             continue
                     carry_run[c] += 1
                     if carry_run[c] > sp.get("max_carry_days", 5):
-                        r.status, r.detail = "FAILED_STALE", f"no new print for >{sp.get('max_carry_days', 5)} consecutive weekdays (dead feed?)"
                         if r.required:
-                            bad.append(f"{c}: FAILED_STALE")
+                            miss(c, d, "FAILED_STALE", bad, day_na, "FAILED_STALE", f"no new print for >{sp.get('max_carry_days', 5)} consecutive weekdays (dead feed?)")
                         continue
                     row[c] = prev_level[c]
                     carried[c] += 1
+                    na_run[c] = 0
                     continue
                 carry_run[c] = 0
                 tail_run[c] = 0
                 if sp["splice"] == "level_exact":
                     new, base = v, prev_level.get(c)
                     if base and base > 0 and abs(math.log(v / base)) > ds["max_abs_daily_logret"]:
-                        (bad.append(f"{c}: |logret|>{ds['max_abs_daily_logret']}") if r.required else log("WARN", "optional value dropped by sanity check", col=c, date=d))
+                        (miss(c, d, f"|logret|>{ds['max_abs_daily_logret']}", bad, day_na) if r.required else log("WARN", "optional value dropped by sanity check", col=c, date=d))
                         continue
                 else:
                     sl, pl = src_last.get(c), prev_level.get(c)
                     if sl is None or pl is None or v <= 0 and sp["transform"] == "log":
-                        bad.append(f"{c}: cannot chain (no base level)")
+                        miss(c, d, "cannot chain (no base level)", bad, day_na)
                         continue
                     if sp["splice"] == "chain_return":
                         if abs(math.log(v / sl)) > ds["max_abs_daily_logret"]:
-                            bad.append(f"{c}: source |logret|>{ds['max_abs_daily_logret']}")
+                            miss(c, d, f"source |logret|>{ds['max_abs_daily_logret']}", bad, day_na)
                             continue
                         new = pl * v / sl
                     else:
                         if abs(v - sl) > ds["max_abs_diff_yield_pp"]:
-                            bad.append(f"{c}: source |diff|>{ds['max_abs_diff_yield_pp']}")
+                            miss(c, d, f"source |diff|>{ds['max_abs_diff_yield_pp']}", bad, day_na)
                             continue
                         new = pl + (v - sl)
                     src_last[c] = float(v)
                 row[c] = float(new)
                 prev_level[c] = float(new)
                 blank_state[c] = False
+                na_run[c] = 0
                 r.n_new_values += 1
             if bad:
                 blocked = True
-                prev_level, src_last, carry_run, tail_run = snap
+                prev_level, src_last, carry_run, tail_run, na_run = snap
                 res.blocked_dates.append(d.isoformat())
                 res.reason = f"{d}: " + "; ".join(bad[:6])
                 continue
+            for c in day_na:
+                na_cells.setdefault(c, []).append(d.isoformat())
             rows.append((d, row))
+        res.na_written = na_cells
+        for c in na_cells:                                   # the instrument is degraded (never SUCCESS) but kept alive for later days
+            if not res.instruments[c].status.startswith("FAILED"):
+                res.instruments[c].status = "FAILED_NA"
+                res.instruments[c].detail = f"NA written on {len(na_cells[c])} day(s); last reason: {na_reason.get(c, '')}"[:200]
+        for c, ds_ in na_cells.items():
+            res.warnings.append(f"{c}: \"NA\" written for {len(ds_)} day(s) {ds_[:6]}{'...' if len(ds_) > 6 else ''} - the R model drops rows with NA in model variables")
         n = append_rows(xlsx, rows)
         assert n == len(rows), "append skipped a date that was supposedly new"
         res.new_dates = [d.isoformat() for d, _ in rows]
@@ -267,7 +308,7 @@ def run_ingest(xlsx: str, cfg: dict, env: dict | None = None, idx_http_factory=N
         any_req = any(r.required and r.status.startswith("FAILED") for r in res.instruments.values())
         any_opt = any((not r.required) and r.status.startswith("FAILED") for r in res.instruments.values())
         if rows:
-            res.status = PARTIAL_SUCCESS if (any_req or any_opt or blocked or res.revisions) else SUCCESS
+            res.status = PARTIAL_SUCCESS if (any_req or any_opt or blocked or res.revisions or na_cells) else SUCCESS
         elif blocked or any_req:
             res.status, res.reason = FAILED, res.reason or "required instrument(s) failed"
         elif row_limit <= last:

@@ -68,6 +68,7 @@ class IngestResult:
     blocked_dates: list = field(default_factory=list)
     row_limit: str | None = None
     warnings: list = field(default_factory=list)
+    na_written: dict = field(default_factory=dict)
     revisions: list = field(default_factory=list)
     instruments: dict = field(default_factory=dict)
     status: str = "PENDING"

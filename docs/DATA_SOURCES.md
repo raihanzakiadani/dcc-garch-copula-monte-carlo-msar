@@ -24,7 +24,23 @@ Jika hari kerja IDX tidak punya data PHEI, run **gagal** (tidak di-carry diam-di
 **Lisensi/ToS:** Bloomberg (sumber riwayat), Yahoo, Investing.com, dan Cloudflare-protected pages umumnya melarang scraping/redistribusi.
 Anda menyatakan sudah punya izin; mohon pastikan juga untuk redistribusi data lewat repo/Release (itu sebabnya repo harus privat).
 
-## Konvensi nilai hilang
-Riwayat `raw_data.xlsx` tidak punya satu pun sel kosong: seluruh 33.551 nilai hilang berupa teks literal `NA`. Baris baru memakai
-konvensi yang sama: saham yang tidak tersedia/ditangguhkan ditulis `NA` (tidak pernah diisi harga lama atau interpolasi); makro dan JCI
-tidak boleh hilang (jika hilang, baris itu tidak dibuat dan run berstatus FAILED/PARTIAL).
+## Konvensi nilai hilang (teks `NA`) dan pengisian gap
+Riwayat `raw_data.xlsx` tidak punya satu pun sel kosong: nilai hilang berupa teks literal `NA`. Baris baru mengikuti itu.
+
+Pengisian gap: ingestion membuat satu baris untuk **setiap hari kerja** dari hari setelah tanggal data terakhir sampai hari kerja terakhir yang sudah final
+(sumber AS/London final ±08.00 WIB esok hari). Batas satu kali jalan: `dataset.max_catchup_days` (45 hari); batas nyata tiap sumber adalah panjang riwayat
+yang ditampilkannya (Investing ±22 hari bursa, MPOC ±10, Westmetall ratusan, feed Yahoo-Sheet 3 bulan, PHEI 2 hari).
+Jika riwayat sumber tidak mencapai tanggal data terakhir Anda, sambungan ditolak (tidak ditebak) dan sel menjadi `NA`.
+
+| Situasi | Yang ditulis |
+|---|---|
+| Saham IDX tidak dikembalikan IDX / masih suspensi (kosong) | `NA` |
+| Pasar libur (sumber hidup, tidak ada harga hari itu) | nilai terakhir dibawa (konvensi riwayat Anda) |
+| Instrumen wajib tidak punya nilai yang bisa dipakai (sumber mati/diblokir, seri tidak cocok, lonjakan tak wajar, feed basi) | `NA` bila `ingest.on_required_failure="na"` (bawaan); status **PARTIAL_SUCCESS**, tidak pernah SUCCESS; berhenti setelah `max_consecutive_na` (5) hari berturut-turut |
+| Sama, tetapi `on_required_failure="block"` | tidak ada baris sama sekali; gap terisi otomatis setelah sumber pulih |
+| JCI / IDX tidak tersedia | tidak pernah diisi `NA`: run berhenti (tanpa IDX libur tidak bisa dibedakan dari gangguan) |
+
+Konsekuensi `NA` pada variabel model: kode R Anda membuang baris yang punya `NA` pada variabel model, jadi hari itu tidak menambah observasi. Hari `NA` tidak
+diisi ulang otomatis; bila perlu, isi manual. Setelah hari `NA`, sambungan dilanjutkan dari nilai valid terakhir (satu return multi-hari, tanpa lonjakan palsu).
+Pengaman: basis sambungan harus menggambarkan keadaan yang sama dengan baris terakhir; bila nilai sumber terbaru lebih tua dari tanggal data terakhir
+dan level tersimpan sudah bergerak, sambungan ditolak agar pergerakan itu tidak terhitung dua kali.

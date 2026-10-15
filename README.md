@@ -48,10 +48,21 @@ tests/ docs/        pytest + uji R; diff terhadap file asli: docs/*.diff
 
 ## 0. Tes bagian data saja (lakukan ini PERTAMA)
 **Actions → fetch-test → Run workflow**, pilih `check`:
-- `probe` (±2 mnt, tidak menulis apa pun): coba jangkau tiap sumber dan tampilkan tabel OK/FAIL di Summary (baris, tanggal & nilai terbaru, atau alasan gagal).
-- `ingest` (±5 mnt): menjalankan ingestion sungguhan pada **salinan** `seed/raw_data.xlsx` dan menampilkan baris baru yang akan ditambahkan, status
-  tiap instrumen, dan cek definisi. Hasilnya (`raw_data.xlsx`) bisa diunduh dari bagian **Artifacts** run itu (disimpan 3 hari). Produksi tidak tersentuh.
+- `seed` (±1 mnt): memeriksa format `seed/raw_data.xlsx` Anda: tanggal berurutan tanpa duplikat, tidak ada hari kerja yang bolong, nilai kosong = teks `NA`
+  (tidak ada sel kosong), kolom sesuai config. Jalankan setelah Anda mengganti seed dengan data yang sudah dilengkapi sampai hari ini.
+- `probe` (±2 mnt, tidak menulis apa pun): menjangkau tiap sumber dan menampilkan OK/FAIL, baris, tanggal terbaru, dan kolom
+  **"can it fill the gap?"**: apakah riwayat sumber itu cukup panjang untuk menutup gap dari tanggal data terakhir Anda sampai hari ini.
+- `ingest` (±5 mnt): menjalankan ingestion sungguhan pada **salinan** `seed/raw_data.xlsx` dan menampilkan SEMUA baris baru (dari hari setelah data
+  terakhir sampai hari kerja terakhir yang sudah final), status tiap instrumen, dan sel yang ditulis `NA`. Hasilnya bisa diunduh dari **Artifacts**
+  (3 hari). Produksi tidak tersentuh.
 Tidak butuh R. Perlu secret `SRC_YAHOO_SHEET_CSV` untuk USDIDR dan Brent.
+
+## 0b. Melengkapi data sampai hari ini sebelum deploy
+1. Lengkapi `raw_data.xlsx` Anda sampai hari kerja terakhir, dengan format yang sama (semua hari kerja ada; libur = nilai terakhir dibawa; kosong = teks `NA`).
+2. Ganti `seed/raw_data.xlsx` dengan file itu, lalu jalankan `fetch-test` dengan `check = seed`. Perbaiki semua **Errors**.
+3. IBPRCPI: PHEI hanya menampilkan 2 hari terakhir. Tambahkan satu baris ke `seed/phei_history.csv`: `TANGGAL-DATA-TERAKHIR,NILAI,last`
+   (nilai dari phei.co.id pada tanggal itu). Pemeriksa seed memperingatkan bila baris ini belum ada.
+4. Push ke GitHub. Pipeline lalu mengisi mulai hari kerja setelah data terakhir sampai hari kerja terakhir yang sudah final.
 
 ## 1b. Di mana data disimpan
 | Apa | Lokasi |

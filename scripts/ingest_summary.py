@@ -8,7 +8,7 @@ w = Path(sys.argv[1]); r = json.loads((w / "ingest_result.json").read_text())
 md = [f"## Data test: ingest status **{r['status']}**", "",
       f"- last date before: `{r.get('last_date_before')}` | after: `{r.get('last_date_after')}` | row limit (newest finalised weekday): `{r.get('row_limit')}`",
       f"- new rows appended: **{len(r.get('new_dates') or [])}** {r.get('new_dates') or ''}", f"- reason: {r.get('reason') or '-'}",
-      f"- blocked dates: {r.get('blocked_dates') or '-'}", f"- revisions seen vs stored: {len(r.get('revisions') or [])}", ""]
+      f"- blocked dates: {r.get('blocked_dates') or '-'}", f"- cells written as NA (required instruments): {r.get('na_written') or '-'}", f"- revisions seen vs stored: {len(r.get('revisions') or [])}", ""]
 md += ["| instrument | status | new values | carried | detail / definition check |", "|---|---|---|---|---|"]
 for k, v in r["instruments"].items():
     if k.endswith("IJ EQUITY") and not str(v["status"]).startswith("FAILED"):

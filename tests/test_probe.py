@@ -26,6 +26,9 @@ def fake_registry(fail=()):
     return {p: mk(p) for p in ("yahoo", "stooq", "westmetall", "investing", "mpoc", "sheet_csv", "phei")}
 
 
+LASTD = T.read_state(T.SEED)["last_date"]
+
+
 def idx_days_all():
     by = T.read_state(T.SEED)["by_date"]; last = max(by)
     return T.idx_days(last, by, [dt.date(2026, 10, 9), dt.date(2026, 10, 12)])
@@ -54,3 +57,17 @@ def test_probe_reports_flaresolverr_down_and_empty_secret_clearly():
     by = {r["source"]: r for r in rows}
     assert by["FlareSolverr service"]["ok"] is False and "not reachable" in by["FlareSolverr service"]["error"]
     assert "SRC_YAHOO_SHEET_CSV is EMPTY" in by["USDIDR BGN Curncy"]["error"] and "Secrets* tab" in by["USDIDR BGN Curncy"]["error"]
+
+
+def test_probe_shows_whether_each_source_can_bridge_the_gap():
+    def reg(oldest):
+        def fn(col, spec, ctx):
+            return pd.Series([1.0, 2.0], index=[oldest, dt.date(2026, 10, 13)])
+        return {p: fn for p in ("investing", "mpoc", "westmetall", "sheet_csv", "phei")}
+    ok = probe(T.CFG, HEADER, {"SRC_YAHOO_SHEET_CSV": "x"}, lambda: T.FakeIdx(idx_days_all()), Web(), reg(dt.date(2026, 9, 1)), NOW, flare_check=lambda: (True, "r"), last_date=LASTD)
+    short = probe(T.CFG, HEADER, {"SRC_YAHOO_SHEET_CSV": "x"}, lambda: T.FakeIdx(idx_days_all()), Web(), reg(dt.date(2026, 10, 12)), NOW, flare_check=lambda: (True, "r"), last_date=LASTD)
+    by = lambda rows: {r["source"]: r for r in rows}
+    assert by(ok)["KO1 Comdty"]["gap"].startswith("OK") and by(short)["KO1 Comdty"]["gap"].startswith("TOO SHORT")
+    assert by(ok)["JCI Index"]["gap"].startswith("OK: one API call per day") and by(ok)["IBPRCPI Index"]["gap"].startswith("n/a")
+    md = to_markdown(short, "info line")
+    assert "can it fill the gap?" in md and "TOO SHORT" in md and "info line" in md

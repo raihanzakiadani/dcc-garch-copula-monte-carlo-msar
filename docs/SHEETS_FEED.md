@@ -52,3 +52,6 @@ Artinya GitHub tidak memberikan secret itu ke job (di log, baris `SRC_YAHOO_SHEE
 5. Setelah menyimpan, jalankan ulang workflow. Secret tidak berlaku surut untuk run yang sudah selesai.
 Uji URL-nya di jendela incognito: harus mengunduh file **.csv** (bukan .xlsx, bukan halaman web). Jika yang terunduh .xlsx atau terbuka halaman web, ulangi
 **File > Share > Publish to web**, pilih tab `feed`, dan format **Comma-separated values (.csv)**.
+
+Catatan: workflow menerima URL ini dari **Secret** `SRC_YAHOO_SHEET_CSV` atau, sebagai cadangan, dari **Variable** dengan nama yang sama (berguna bila terlanjur
+dibuat di tab Variables). Secret lebih disarankan karena nilainya tersembunyi dari semua orang yang punya akses ke repo.
