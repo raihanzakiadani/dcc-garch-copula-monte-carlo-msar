@@ -25,7 +25,7 @@ jobs:
     env:
       FLARESOLVERR_URL: http://localhost:8191/v1
       PROXY_URL: ${{ secrets.PROXY_URL }}
-      SRC_YAHOO_SHEET_CSV: ${{ secrets.SRC_YAHOO_SHEET_CSV || vars.SRC_YAHOO_SHEET_CSV }}
+      SRC_YAHOO_SHEET_CSV: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSl3Q9PPdNnIJvhyh8hqjMtJCsaD4RzmORlsvrLqVjIbBdFV4qbxOzDs6j7kHtAUyz_Awk6v-pifBd6/pub?gid=1171375640&single=true&output=csv"
       TZ: Asia/Jakarta
     steps:
       - uses: actions/checkout@v4
